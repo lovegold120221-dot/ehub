@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.util.Log
 import android.os.Handler
 import android.os.Looper
@@ -27,6 +28,7 @@ class MainActivity : FlutterActivity() {
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private var importChannel: MethodChannel? = null
+    private val ttsChannelName = "com.orailnoor.privatelm/tts_playback"
     private var pendingImportResult: MethodChannel.Result? = null
     private var pendingModelsDir: String? = null
     private val monitoredInAppDownloads = ConcurrentHashMap.newKeySet<Long>()
@@ -133,6 +135,70 @@ class MainActivity : FlutterActivity() {
             }
         }
 
+        // Background read-aloud: Dart starts/stops the media-playback
+        // foreground service with the speaking state.
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, ttsChannelName)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "startPlayback" -> {
+                        startTtsService()
+                        result.success(null)
+                    }
+                    "stopPlayback" -> {
+                        stopTtsService()
+                        result.success(null)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+
+        // Cold start via the notification Stop action.
+        handleTtsIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleTtsIntent(intent)
+    }
+
+    /// Notification Stop action: stop the service immediately, then ask
+    /// Dart to stop speech. The extra is consumed so rotations/recreates
+    /// never re-trigger it.
+    private fun handleTtsIntent(intent: Intent?) {
+        if (intent?.getBooleanExtra(TtsPlaybackService.EXTRA_STOP_TTS, false) != true) return
+        intent.removeExtra(TtsPlaybackService.EXTRA_STOP_TTS)
+        stopTtsService()
+        try {
+            importChannel?.invokeMethod("stopTts", null)
+        } catch (e: Exception) {
+            Log.w("MainActivity", "stopTts forward failed: ${e.message}")
+        }
+    }
+
+    private fun startTtsService() {
+        try {
+            val intent = Intent(this, TtsPlaybackService::class.java)
+                .setAction(TtsPlaybackService.ACTION_START)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+        } catch (e: Exception) {
+            Log.w("MainActivity", "TTS service start failed: ${e.message}")
+        }
+    }
+
+    private fun stopTtsService() {
+        try {
+            startService(
+                Intent(this, TtsPlaybackService::class.java)
+                    .setAction(TtsPlaybackService.ACTION_STOP)
+            )
+        } catch (e: Exception) {
+            Log.w("MainActivity", "TTS service stop failed: ${e.message}")
+        }
     }
 
     private fun restartApp() {

@@ -84,7 +84,7 @@ class AppConstants {
   static const double defaultTtsRate = 1.0; // neural speed multiplier
   static const double minTtsRate = 0.7;
   static const double maxTtsRate = 2.0;
-  static const bool defaultTtsAutoRead = false;
+  static const bool defaultTtsAutoRead = true; // autoplay answers; radio-toggleable
 
   /// EburonVoix-Lite voice bundle (Piper nl_BE-nathalie int8 + tokens +
   /// espeak data, ~21 MB) and fallback espeak-ng-data (~7 MB), in case a

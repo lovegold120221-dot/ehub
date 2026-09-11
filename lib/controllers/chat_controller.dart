@@ -534,6 +534,8 @@ class ChatController extends GetxController {
     streamingResponse.value = '';
     _followStreaming = true;
     _scrollToBottom(force: true);
+    // Live auto-read: sentence chunks start synthesizing while streaming.
+    unawaited(_ttsOrNull?.beginLiveRead());
 
     try {
       DateTime? thoughtStartedAt;
@@ -668,6 +670,7 @@ class ChatController extends GetxController {
               // Real-time streaming update
               streamingResponse.value += token;
               trackThoughtTiming();
+              _ttsOrNull?.feedLiveRead(streamingResponse.value);
               _scrollToBottom();
             },
           );
@@ -684,6 +687,7 @@ class ChatController extends GetxController {
           onToken: (token) {
             streamingResponse.value += token;
             trackThoughtTiming();
+            _ttsOrNull?.feedLiveRead(streamingResponse.value);
             _scrollToBottom();
           },
         );
@@ -732,6 +736,9 @@ class ChatController extends GetxController {
       messages.add(aiMsg);
       _hive.saveMessage(aiMsg.id, aiMsg.toMap());
       imageGenStartTime.value = null;
+      // Live auto-read: flush the streamed remainder (already-spoken
+      // sentences are not repeated).
+      _ttsOrNull?.endLiveRead();
 
       // Update session
       final session =
@@ -744,6 +751,8 @@ class ChatController extends GetxController {
       }
     } catch (e) {
       if (generationId != _generationSerial) return;
+      // Never read error messages aloud; stop any partial live speech.
+      _ttsOrNull?.cancelLiveRead();
       isStreaming.value = false;
       streamingAttachmentType.value = null;
       streamingResponse.value = '';
@@ -773,6 +782,9 @@ class ChatController extends GetxController {
 
   void stopGenerating() {
     if (!isLoading.value && !isStreaming.value) return;
+    // Stopping generation also stops live read-aloud; the saved partial
+    // message stays replayable via its speaker icon.
+    _ttsOrNull?.cancelLiveRead();
     final partialResponse = streamingResponse.value.trim();
     if (partialResponse.isNotEmpty) {
       final tps = Get.find<InferenceService>().tokensPerSecond.value;
@@ -796,6 +808,14 @@ class ChatController extends GetxController {
     Get.find<LocalImageService>().cancelGeneration();
   }
 
+  TtsService? get _ttsOrNull {
+    try {
+      return Get.find<TtsService>();
+    } catch (_) {
+      return null;
+    }
+  }
+
   void _saveAssistantMessage({
     required String content,
     String? imageBase64,
@@ -814,11 +834,10 @@ class ChatController extends GetxController {
     messages.add(aiMsg);
     _hive.saveMessage(aiMsg.id, aiMsg.toMap());
 
-    // Auto-read-aloud for model responses (speaker toggle).
-    try {
-      final tts = Get.find<TtsService>();
-      if (tts.autoRead.value) unawaited(tts.speak(content));
-    } catch (_) {}
+    // Live auto-read flush (no-op when no session is active, e.g. after
+    // stopGenerating cancelled it). Never re-speaks the full text here:
+    // streamed sentences were already queued live.
+    _ttsOrNull?.endLiveRead();
 
     final session =
         sessions.firstWhereOrNull((s) => s.id == currentSessionId.value);

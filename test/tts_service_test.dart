@@ -240,6 +240,53 @@ void main() {
     });
   });
 
+  group('TtsService live streaming slices', () {
+    test('holds partial sentences until a boundary arrives', () {
+      var s = TtsService.takeLiveSlice('Hallo wereld', '');
+      expect(s.ready, isEmpty);
+      expect(s.consumed, isEmpty);
+
+      s = TtsService.takeLiveSlice('Hallo wereld. Dit is', '');
+      expect(s.ready, ['Hallo wereld.']);
+
+      s = TtsService.takeLiveSlice(
+          'Hallo wereld. Dit is Eburon. ', s.consumed);
+      expect(s.ready, ['Dit is Eburon.']);
+    });
+
+    test('never repeats on non-monotonic input', () {
+      final s = TtsService.takeLiveSlice('Helemaal anders', 'Hallo wereld. ');
+      expect(s.ready, isEmpty);
+      expect(s.consumed, 'Hallo wereld. ');
+    });
+
+    test('force-flushes long boundary-less tails', () {
+      final long = List.filled(130, 'woord').join(' ');
+      final s = TtsService.takeLiveSlice(long, '');
+      expect(s.ready.length, 1);
+      expect(s.consumed.isNotEmpty, isTrue);
+      // The remainder stays queued for the next feed, not repeated.
+      final next = TtsService.takeLiveSlice('$long en meer', s.consumed);
+      expect(next.ready.join(' '), isNot(contains('woord woord woord')));
+    });
+
+    test('finalLiveChunks flushes the partial tail once', () {
+      expect(
+          TtsService.finalLiveChunks('Een. Twee drie', 'Een. '), ['Twee drie']);
+      expect(TtsService.finalLiveChunks('Een. ', 'Een. '), isEmpty);
+    });
+
+    test('streamCleanText drops unclosed fences and think blocks', () {
+      expect(TtsService.streamCleanText('Lees dit ```dart\nprint(1);'),
+          'Lees dit ');
+      expect(TtsService.streamCleanText('Hi <think>geheim plan'), 'Hi ');
+      expect(TtsService.streamCleanText('Hi <thought>x</thought> ok'),
+          contains('ok'));
+      expect(TtsService.streamCleanText('Gewone zin. Klaar. '),
+          'Gewone zin. Klaar. ');
+    });
+  });
+
   group('encodeWav16', () {
     test('fades chunk edges to prevent joint clicks', () {
       final samples = Float32List.fromList(List.filled(4410, 0.5));

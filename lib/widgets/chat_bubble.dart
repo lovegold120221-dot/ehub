@@ -298,9 +298,9 @@ class _CopyButton extends StatelessWidget {
   }
 }
 
-/// Speaker button: toggles auto-read-aloud for model responses.
-/// Enabling it reads this message immediately; new responses are then
-/// read automatically until it is toggled off.
+/// Speaker button: plays or stops this message. Tapping while speaking
+/// stops playback; tapping a silent message reads it aloud once, without
+/// changing the auto-read setting (voice settings radio).
 class _SpeakButton extends StatelessWidget {
   final String text;
 
@@ -310,14 +310,12 @@ class _SpeakButton extends StatelessWidget {
   Widget build(BuildContext context) {
     final tts = Get.find<TtsService>();
     return Obx(() {
-      final auto = tts.autoRead.value;
       final speaking = tts.isSpeaking.value;
       return InkWell(
         onTap: () async {
-          if (tts.autoRead.value) {
-            await tts.setAutoRead(false);
+          if (tts.isSpeaking.value) {
+            await tts.stop();
           } else {
-            await tts.setAutoRead(true);
             await tts.speak(text);
           }
         },
@@ -325,9 +323,9 @@ class _SpeakButton extends StatelessWidget {
         child: Padding(
           padding: const EdgeInsets.all(4),
           child: Icon(
-            speaking && auto ? Icons.stop_rounded : Icons.volume_up_rounded,
+            speaking ? Icons.stop_rounded : Icons.volume_up_rounded,
             size: 15,
-            color: auto
+            color: speaking
                 ? Theme.of(context).colorScheme.primary
                 : Theme.of(context).hintColor.withValues(alpha: 0.7),
           ),

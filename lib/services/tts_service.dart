@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:archive/archive.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:dio/dio.dart';
+import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 import '../core/constants.dart';
 import 'app_log_service.dart';
@@ -12,9 +14,14 @@ import 'device_info_service.dart';
 import 'download_service.dart';
 import 'eburonvoix_lite.dart';
 import 'hive_service.dart';
+import 'tts_background.dart';
 import 'supertonic/flemish_text.dart';
 import 'supertonic/supertonic_engine.dart';
 import 'supertonic/supertonic_wav.dart';
+
+/// Synthesizes one live chunk: returns PCM samples + sample rate.
+typedef LiveSynth = Future<({List<double> samples, int sampleRate})> Function(
+    String chunk);
 
 /// Text-to-speech service: two on-device neural engines, nothing else.
 ///
@@ -23,8 +30,10 @@ import 'supertonic/supertonic_wav.dart';
 /// - EburonVoix-Lite (Piper nl_BE-nathalie via sherpa-onnx): tiny (~21 MB),
 ///   very fast, Flemish-only — the fallback for small phones.
 ///
-/// No system TTS, no cloud. Speech streams sentence-by-sentence from
-/// response text; the speaker icon toggles auto-read.
+/// No system TTS, no cloud. When auto-read is on (voice settings radio,
+/// default on), new responses stream sentence-by-sentence to the selected
+/// engine while the model is still generating; the speaker icon plays or
+/// stops a single message manually without changing the setting.
 class TtsService extends GetxService {
   HiveService get _hive => Get.find<HiveService>();
   AppLogService get _log => Get.find<AppLogService>();
@@ -83,9 +92,20 @@ class TtsService extends GetxService {
         AppConstants.minTtsRate, AppConstants.maxTtsRate);
     autoRead.value = _hive.getSetting<bool>(AppConstants.keyTtsAutoRead,
             defaultValue: AppConstants.defaultTtsAutoRead) ??
-        false;
+        AppConstants.defaultTtsAutoRead;
     await refreshSupertonicStatus();
     await refreshLiteStatus();
+    // Background audio: speaking state drives the Android media-playback
+    // foreground service, so read-aloud keeps running when the app is
+    // backgrounded. No-op on other platforms (facade stub).
+    ever<bool>(isSpeaking, (speaking) {
+      if (speaking) {
+        unawaited(startTtsBackgroundAudio());
+      } else {
+        unawaited(stopTtsBackgroundAudio());
+      }
+    });
+    _listenForNativeStop();
     if (engine.value == AppConstants.ttsEngineSupertonic3) {
       unawaited(_ensureNeuralEngine().catchError((_) {}));
     } else {
@@ -147,6 +167,13 @@ class TtsService extends GetxService {
   }
 
   Future<void> stop() async {
+    // A stop always kills a live session too: the pump loop exits on the
+    // bumped run id, so manual stops and manual speaks can never overlap
+    // streamed auto-read playback.
+    _liveRunId++;
+    _liveQueue.clear();
+    _liveActive = false;
+    _liveFinal = false;
     _stopRequested = true;
     try {
       await _audioPlayer?.stop();
@@ -154,10 +181,281 @@ class TtsService extends GetxService {
     isSpeaking.value = false;
   }
 
+  // ── Live auto-read (streaming model responses) ──
+
+  // A live session feeds the still-generating response sentence by sentence
+  // to the selected engine: ChatController calls beginLiveRead() when
+  // generation starts, feedLiveRead(accumulatedText) per token batch, and
+  // endLiveRead() on completion. Playback starts with the first finished
+  // sentence instead of waiting for the full answer.
+  final _liveQueue = Queue<String>();
+  var _liveRunId = 0;
+  var _liveActive = false;
+  var _liveFinal = false;
+  var _livePumping = false;
+  var _liveConsumed = '';
+  var _liveLatestRaw = '';
+  var _liveLastFeedMs = 0;
+  LiveSynth? _liveSynth;
+
+  static const _liveFeedMinIntervalMs = 350;
+
+  /// Starts a live read-aloud session for a new model response. No-op
+  /// unless auto-read is on and the selected engine is already usable —
+  /// warming/loading stays on the manual speaker path, so auto-read never
+  /// triggers silent downloads or load spinners mid-chat. Stops anything
+  /// currently playing.
+  Future<void> beginLiveRead() async {
+    await stop(); // also invalidates any previous live session
+    if (!autoRead.value) return;
+    try {
+      if (engine.value == AppConstants.ttsEngineLite) {
+        final lite = _lite;
+        if (!isLiteUsable || lite == null) {
+          _log.info('[TTS] live read skipped: Lite engine not ready.');
+          return;
+        }
+        _startLiveSession((c) async {
+          final u = await Future(() => lite.synthesize(c, speed: rate.value));
+          return (samples: u.samples, sampleRate: u.sampleRate);
+        });
+      } else {
+        final neural = _neural;
+        if (!isSupertonicUsable || neural == null) {
+          _log.info('[TTS] live read skipped: EburonVoix-3 not ready.');
+          return;
+        }
+        final style = await _loadNeuralStyle();
+        final lang = _neuralLang();
+        final speed = rate.value;
+        final sr = neural.sampleRate;
+        _startLiveSession((c) async {
+          final wav = await neural.synthesize(
+            c,
+            style: style,
+            lang: lang,
+            speed: speed,
+          );
+          return (samples: wav, sampleRate: sr);
+        });
+      }
+    } catch (e) {
+      _log.error('[TTS] live read failed to start', details: e);
+    }
+  }
+
+  void _startLiveSession(LiveSynth synth) {
+    _liveRunId++;
+    _liveQueue.clear();
+    _liveActive = true;
+    _liveFinal = false;
+    _livePumping = false;
+    _liveConsumed = '';
+    _liveLatestRaw = '';
+    _liveLastFeedMs = 0;
+    _liveSynth = synth;
+    _stopRequested = false;
+    isSpeaking.value = true;
+    _kickLivePump();
+  }
+
+  /// Feeds the latest accumulated response text. Cleaning/slicing runs at
+  /// most every [_liveFeedMinIntervalMs]; [endLiveRead] always flushes the
+  /// tail, so throttled frames are never lost.
+  void feedLiveRead(String rawText) {
+    if (!_liveActive) return;
+    _liveLatestRaw = rawText;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - _liveLastFeedMs < _liveFeedMinIntervalMs) return;
+    _liveLastFeedMs = now;
+    _ingestLive(_liveLatestRaw, false);
+  }
+
+  /// Flushes the remaining (possibly partial) tail and lets the queue
+  /// drain. Safe to call when no session is active.
+  void endLiveRead() {
+    if (!_liveActive && _liveQueue.isEmpty) return;
+    _liveLastFeedMs = 0;
+    _ingestLive(_liveLatestRaw, true);
+    _liveFinal = true;
+    _kickLivePump();
+  }
+
+  /// Aborts a live session and stops playback. Safe to call anytime.
+  void cancelLiveRead() {
+    _liveQueue.clear();
+    _liveActive = false;
+    _liveFinal = false;
+    _liveConsumed = '';
+    _liveRunId++;
+    unawaited(stop());
+  }
+
+  void _ingestLive(String raw, bool finalFlush) {
+    final cleaned = FlemishText.normalize(speakableText(streamCleanText(raw)));
+    if (cleaned.isEmpty) return;
+    if (finalFlush) {
+      for (final c in finalLiveChunks(cleaned, _liveConsumed)) {
+        _liveQueue.add(c);
+      }
+      _liveConsumed = cleaned;
+    } else {
+      final slice = takeLiveSlice(cleaned, _liveConsumed);
+      for (final seg in slice.ready) {
+        for (final c in splitIntoChunks(seg)) {
+          _liveQueue.add(c);
+        }
+      }
+      _liveConsumed = slice.consumed;
+    }
+    _kickLivePump();
+  }
+
+  void _kickLivePump() {
+    if (_livePumping || !_liveActive) return;
+    final synth = _liveSynth;
+    if (synth == null) return;
+    _livePumping = true;
+    unawaited(_pumpLive(_liveRunId, synth));
+  }
+
+  /// Sequential pump: synthesize each queued chunk and play it through the
+  /// shared WAV pipeline. Stale runs (superseded by stop/speak/begin) exit
+  /// without touching the newer session's flags.
+  Future<void> _pumpLive(int run, LiveSynth synth) async {
+    try {
+      final player = await _player();
+      final chunkFile = await _chunkFile();
+      while (run == _liveRunId) {
+        if (_liveQueue.isEmpty) {
+          if (_liveFinal) break;
+          await Future.delayed(const Duration(milliseconds: 120));
+          continue;
+        }
+        final chunk = _liveQueue.removeFirst();
+        if (chunk.trim().isEmpty) continue;
+        List<double> wav;
+        int sr;
+        try {
+          final r = await synth(chunk);
+          wav = r.samples;
+          sr = r.sampleRate;
+        } catch (e) {
+          _log.error('[TTS] live synthesis failed', details: e);
+          break;
+        }
+        if (run != _liveRunId || _stopRequested) break;
+        _log.info('[TTS] live chunk: ${wav.length} samples @ $sr Hz');
+        if (!await _playChunk(wav, sr, player, chunkFile)) break;
+      }
+    } finally {
+      if (run == _liveRunId) {
+        _livePumping = false;
+        _liveActive = false;
+        isSpeaking.value = false;
+      }
+    }
+  }
+
+  /// Drops streaming-only noise before cleaning: an unclosed trailing code
+  /// fence and any unclosed think/thought block (reasoning is never
+  /// spoken). Pure (unit-tested).
+  static String streamCleanText(String raw) {
+    var out = raw;
+    final fences = RegExp('```').allMatches(out).toList();
+    if (fences.length.isOdd) out = out.substring(0, fences.last.start);
+    for (final tag in ['<think>', '<thought>']) {
+      final open = out.lastIndexOf(tag);
+      if (open >= 0) {
+        final close = out.indexOf('</${tag.substring(1)}', open);
+        if (close < 0) out = out.substring(0, open);
+      }
+    }
+    return out;
+  }
+
+  /// Slices newly completed sentences off streaming text. [cleaned] is the
+  /// full cleaned response so far, [consumed] the prefix already queued.
+  /// Only text ending in a sentence boundary is returned; the trailing
+  /// partial sentence waits for more tokens. Boundary-less tails longer
+  /// than 2×[maxLen] are force-flushed so speech never stalls. Pure
+  /// (unit-tested).
+  static ({List<String> ready, String consumed}) takeLiveSlice(
+    String cleaned,
+    String consumed, [
+    int maxLen = 300,
+  ]) {
+    var start = 0;
+    if (consumed.isNotEmpty) {
+      // Never repeat speech: on non-monotonic input, hold and retry on the
+      // next feed instead of guessing.
+      if (!cleaned.startsWith(consumed)) {
+        return (ready: const [], consumed: consumed);
+      }
+      start = consumed.length;
+    }
+    final rest = cleaned.substring(start);
+    var cut = -1;
+    for (final m in RegExp(r'[.!?…\n]\s+').allMatches(rest)) {
+      cut = m.end;
+    }
+    if (cut < 0) {
+      if (rest.length > maxLen * 2) {
+        var cutAt = rest.lastIndexOf(RegExp(r'[ ,;:]\s'), maxLen);
+        if (cutAt < maxLen ~/ 3) cutAt = maxLen;
+        final piece = rest.substring(0, cutAt).trim();
+        return (
+          ready: piece.isEmpty ? const [] : [piece],
+          consumed: consumed + rest.substring(0, cutAt),
+        );
+      }
+      return (ready: const [], consumed: consumed);
+    }
+    final readyText = rest.substring(0, cut).trim();
+    return (
+      ready: readyText.isEmpty ? const [] : [readyText],
+      consumed: consumed + rest.substring(0, cut),
+    );
+  }
+
+  /// Remaining tail for [endLiveRead]: everything past [consumed],
+  /// chunked normally (partial final sentence included). Pure
+  /// (unit-tested).
+  static List<String> finalLiveChunks(String cleaned, String consumed) {
+    var tail = cleaned;
+    if (consumed.isNotEmpty) {
+      if (!cleaned.startsWith(consumed)) return [];
+      tail = cleaned.substring(consumed.length);
+    }
+    return splitIntoChunks(tail);
+  }
+
   Future<AudioPlayer> _player() async {
     final player = _audioPlayer ??= AudioPlayer();
     await player.setVolume(1.0);
+    // Media usage + wake lock so chunks keep flowing in the background
+    // under the foreground service.
+    try {
+      await player.setAudioContext(AudioContext(
+        android: const AudioContextAndroid(
+          stayAwake: true,
+          contentType: AndroidContentType.music,
+          usageType: AndroidUsageType.media,
+        ),
+      ));
+    } catch (_) {}
     return player;
+  }
+
+  /// Notification Stop action (native shell) asks Dart to stop speech via
+  /// the shared model-import channel. No-op anywhere it cannot work.
+  void _listenForNativeStop() {
+    try {
+      const MethodChannel('com.aichat.ai_chat/model_import')
+          .setMethodCallHandler((call) async {
+        if (call.method == 'stopTts') await stop();
+      });
+    } catch (_) {}
   }
 
   Future<File> _chunkFile() async {

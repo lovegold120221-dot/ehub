@@ -1224,19 +1224,36 @@ class SettingsView extends GetView<SettingsController> {
           onChanged: (v) => tts.setRate(v),
         ),
         const SizedBox(height: 10),
-        _appleGroupedCard(context, isDark, children: [
+        RadioGroup<bool>(
+          groupValue: tts.autoRead.value,
+          onChanged: (v) {
+            if (v != null) tts.setAutoRead(v);
+          },
+          child: _appleGroupedCard(context, isDark, children: [
           _appleListTile(
             context,
             isDark,
             leading: _iconBox(AppColors.success, Icons.volume_up_rounded),
-            title: 'Auto-read responses',
-            subtitle: 'Speaker icon toggles this · new answers play aloud',
-            trailing: Switch(
-              value: tts.autoRead.value,
-              activeThumbColor: accent,
-              onChanged: (v) => tts.setAutoRead(v),
+            title: 'Auto',
+            subtitle: 'Narrate new answers while they stream',
+            trailing: const Radio<bool>(
+              value: true,
+              activeColor: AppColors.success,
             ),
-            onTap: () => tts.setAutoRead(!tts.autoRead.value),
+            onTap: () => tts.setAutoRead(true),
+          ),
+          _appleListTile(
+            context,
+            isDark,
+            leading:
+                _iconBox(AppColors.secondary, Icons.touch_app_rounded),
+            title: 'Manual',
+            subtitle: 'Only when you tap the speaker icon',
+            trailing: const Radio<bool>(
+              value: false,
+              activeColor: AppColors.success,
+            ),
+            onTap: () => tts.setAutoRead(false),
           ),
           _appleListTile(
             context,
@@ -1315,7 +1332,7 @@ class SettingsView extends GetView<SettingsController> {
                     }
                   },
           ),
-        ])
+        ]))
       ]);
     });
   }
