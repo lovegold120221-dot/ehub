@@ -158,3 +158,7 @@ flutter build web --release
 ## License
 
 MIT — see [LICENSE](./LICENSE) for details.
+
+---
+
+*Developed by **Master E — Emil Alvaro Serrano Danguilan** for **Eburon AI**, founded by **Joe Lernout**.*
