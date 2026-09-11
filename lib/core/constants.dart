@@ -83,6 +83,11 @@ class AppConstants {
   static const double defaultFontScale =
       0.95; // 4th slider stop, "Small" default
 
+  /// Preselected default on-device assistant (Eburon Edge). Auto-downloaded
+  /// + auto-loaded on first launch when no local model is selected yet.
+  static const String defaultEdgeModelFilename =
+      'smollm2-360m-instruct-q4_k_m.gguf';
+
   // TTS — on-device neural engines only (no system TTS, no cloud).
   static const String ttsEngineSupertonic3 = 'supertonic3'; // EburonVoix-3
   static const String ttsEngineLite = 'lite'; // EburonVoix-Lite (Piper nl_BE)
@@ -295,6 +300,26 @@ class AppConstants {
       'size': '1.6 GB',
       'description': '🔓 Abliterated — Permanently uncensored, very smart',
       'template': 'gemma',
+    },
+    {
+      'name': 'SmolLM2-360M Instruct (Q4_K_M)',
+      'filename': 'smollm2-360m-instruct-q4_k_m.gguf',
+      'url':
+          'https://huggingface.co/mradermacher/SmolLM2-360M-Instruct-GGUF/resolve/main/SmolLM2-360M-Instruct.Q4_K_M.gguf',
+      'size': '258 MB',
+      'description':
+          'Default on-device assistant · tiny, instant, no thinking delay',
+      'template': 'chatml',
+    },
+    {
+      'name': 'Qwen2.5-0.5B Instruct (Q4_K_M)',
+      'filename': 'qwen2.5-0.5b-instruct-q4_k_m.gguf',
+      'url':
+          'https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf',
+      'size': '379 MB',
+      'description':
+          'Small and capable all-rounder · install as an alternative',
+      'template': 'chatml',
     },
     {
       'name': 'SmolLM2-1.7B-Uncensored (Q4_K_M)',

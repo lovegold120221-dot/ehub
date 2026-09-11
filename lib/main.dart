@@ -114,6 +114,8 @@ void main() {
     // Apply system UI after frame is rendered so Get.mediaQuery is available
     WidgetsBinding.instance.addPostFrameCallback((_) {
       settingsController.setThemeMode(settingsController.themeMode.value);
+      // First launch: fetch + load the default on-device assistant.
+      unawaited(Get.find<ModelController>().ensureEdgeDefault());
     });
   }, (error, stack) async {
     if (Get.isRegistered<AppLogService>()) {

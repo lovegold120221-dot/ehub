@@ -33,6 +33,14 @@ void main() {
       expect(m.hasEburonAlias, isTrue);
     });
 
+    test('brands the default edge model as Eburon-Edge', () {
+      final m = model('SmolLM2-360M Instruct (Q4_K_M)',
+          'smollm2-360m-instruct-q4_k_m.gguf');
+      expect(m.displayName, 'Eburon-Edge');
+      expect(m.hasEburonAlias, isTrue);
+      expect(m.runtime, AiModel.runtimeLlama);
+    });
+
     test('covers vision and image catalog models', () {
       expect(
         model('Qwen2-VL-2B Instruct (Q4_K_M)',

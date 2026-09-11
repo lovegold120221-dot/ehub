@@ -936,22 +936,35 @@ class ChatController extends GetxController {
       for (final m in raw.reversed) {
         if (kept.length >= AppConstants.memoryMaxMessagesPerSession) break;
         final msg = ChatMessage.fromMap(m);
-        if (msg.role != 'user' && msg.role != 'assistant') continue;
-        var text = msg.content.trim();
-        if (text.isEmpty ||
-            text.startsWith('❌') ||
-            text.startsWith('[IMAGE_BASE64]')) {
-          continue;
-        }
-        if (text.length > AppConstants.memoryMaxMessageChars) {
-          text = '${text.substring(0, AppConstants.memoryMaxMessageChars)}…';
-        }
+        final text = memoryMessageText(msg.role, msg.content);
+        if (text.isEmpty) continue;
         kept.add((role: msg.role, content: text));
       }
       if (kept.isEmpty) continue;
       past.add((title: s.title, messages: kept.reversed.toList()));
     }
     return buildMemoryBlock(past);
+  }
+
+  /// Cleans one recalled message for the memory block. Assistant reasoning
+  /// traces are stripped exactly like live history does — raw `<think>`
+  /// blocks in the system prompt teach small models to emit their thinking
+  /// as the visible answer. Errors, image payloads, and non-chat roles are
+  /// dropped; the rest is trimmed to the memory budget. Pure (unit-tested).
+  static String memoryMessageText(String role, String content) {
+    if (role != 'user' && role != 'assistant') return '';
+    var text = role == 'assistant'
+        ? splitThoughtTags(content).answer.trim()
+        : content.trim();
+    if (text.isEmpty ||
+        text.startsWith('❌') ||
+        text.startsWith('[IMAGE_BASE64]')) {
+      return '';
+    }
+    if (text.length > AppConstants.memoryMaxMessageChars) {
+      text = '${text.substring(0, AppConstants.memoryMaxMessageChars)}…';
+    }
+    return text;
   }
 
   /// Formats recalled chats into one system-prompt block, hard-capped at

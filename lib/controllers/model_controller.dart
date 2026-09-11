@@ -355,6 +355,68 @@ class ModelController extends GetxController {
     await _saveCustomModels();
   }
 
+  /// First-launch setup: downloads Eburon Edge (the preselected default
+  /// on-device assistant) when no local model is selected yet, then loads
+  /// it. Safe to call on every startup — no-ops unless there is nothing
+  /// selected and Edge isn't already loaded. Must run after the first
+  /// frame (uses snackbars). Silent on failure besides a log entry.
+  Future<void> ensureEdgeDefault() async {
+    try {
+      if (!_inference.supportsLocalInference) return;
+      if (_inference.isLoadingModel.value || _inference.isModelLoaded.value) {
+        return;
+      }
+      final selected =
+          _hive.getSetting<String>(AppConstants.keyLocalModelName);
+      if (selected != null && selected.isNotEmpty) return;
+      if (_inference.requiresAppRestartForRuntime(AiModel.runtimeLlama)) {
+        return;
+      }
+      final edge = availableModels.firstWhereOrNull(
+          (m) => m.filename == AppConstants.defaultEdgeModelFilename);
+      if (edge == null || edge.url.trim().isEmpty) return;
+      if (!await _download.isModelDownloaded(edge.filename)) {
+        Get.snackbar(
+          'Eburon Edge',
+          'Downloading the default on-device assistant…',
+          snackPosition: SnackPosition.BOTTOM,
+          duration: const Duration(seconds: 3),
+        );
+        await _download.downloadModel(url: edge.url, filename: edge.filename);
+        await refreshDownloaded();
+      }
+      if (_inference.isLoadingModel.value || _inference.isModelLoaded.value) {
+        return;
+      }
+      final selectedNow =
+          _hive.getSetting<String>(AppConstants.keyLocalModelName);
+      if (selectedNow != null && selectedNow.isNotEmpty) return;
+      final path = await _download.modelPath(edge.filename);
+      final result = await _inference.loadModel(
+        path,
+        modelName: edge.filename,
+        modelRuntime: AiModel.runtimeLlama,
+      );
+      if (_inference.isModelLoaded.value) {
+        await _hive.setSetting(AppConstants.keyLocalModelPath, path);
+        await _hive.setSetting(AppConstants.keyLocalModelName, edge.filename);
+        await _settings.setInferenceMode('local');
+        Get.snackbar(
+          'Eburon Edge',
+          'Default assistant ready · offline',
+          snackPosition: SnackPosition.BOTTOM,
+          duration: const Duration(seconds: 3),
+        );
+      } else {
+        Get.find<AppLogService>().error('Edge auto-load failed',
+            details: result);
+      }
+    } catch (e) {
+      Get.find<AppLogService>()
+          .error('Edge auto-setup failed', details: e);
+    }
+  }
+
   Future<void> downloadModel(AiModel model) async {
     try {
       await _download.downloadModel(

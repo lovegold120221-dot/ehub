@@ -38,4 +38,31 @@ void main() {
       expect(out.endsWith('…'), isTrue);
     });
   });
+
+  group('ChatController.memoryMessageText', () {
+    test('strips assistant thinking traces like live history does', () {
+      final out = ChatController.memoryMessageText(
+        'assistant',
+        '<think>private reasoning here</think>Het antwoord.',
+      );
+      expect(out.contains('private reasoning'), isFalse);
+      expect(out, contains('Het antwoord.'));
+    });
+
+    test('drops errors, images, and non-chat roles', () {
+      expect(
+          ChatController.memoryMessageText('assistant', '❌ Error: x'), isEmpty);
+      expect(ChatController.memoryMessageText('assistant', '[IMAGE_BASE64]xx'),
+          isEmpty);
+      expect(ChatController.memoryMessageText('system', 'hello'), isEmpty);
+      expect(ChatController.memoryMessageText('user', '  '), isEmpty);
+    });
+
+    test('keeps user text and trims long messages', () {
+      expect(ChatController.memoryMessageText('user', '  hallo  '), 'hallo');
+      final long = ChatController.memoryMessageText('user', 'y' * 5000);
+      expect(long.endsWith('…'), isTrue);
+      expect(long.length, lessThanOrEqualTo(301));
+    });
+  });
 }

@@ -20,7 +20,7 @@ class AiModel {
     'phi-3.5-mini-instruct-q4_k_m.gguf': 'Eburon-Pulsar',
     'gemma-2-2b-it-q4_k_m.gguf': 'Eburon-Altair',
     'gemma-2-2b-it-abliterated-q4_k_m.gguf': 'Eburon-Antares',
-    'smollm2-1.7b-instruct-uncensored-q4_k_m.gguf': 'Eburon-Spica',
+    'smollm2-360m-instruct-q4_k_m.gguf': 'Eburon-Edge',
     'dolphin-3.0-qwen2.5-1.5b-q4_k_m.gguf': 'Eburon-Orion',
     'llama-3.2-3b-instruct-uncensored-q4_k_m.gguf': 'Eburon-Betelgeuse',
     'llama-3.2-1b-instruct-q4_k_m.gguf': 'Eburon-Proxima',

@@ -110,11 +110,16 @@ class TtsService extends GetxService {
       }
     });
     _listenForNativeStop();
+    // First-launch voice setup: the selected engine warms (auto-installing
+    // its assets) while the tiny Lite bundle prefetches silently, so both
+    // voices end up usable offline. Paths are app-private and re-resolved
+    // every launch, so they survive updates without stored absolutes.
     if (engine.value == AppConstants.ttsEngineSupertonic3) {
       unawaited(_ensureNeuralEngine().catchError((_) {}));
     } else {
       unawaited(_ensureLiteEngine().catchError((_) {}));
     }
+    unawaited(_prefetchLiteBundle().catchError((_) {}));
     return this;
   }
 
@@ -730,6 +735,19 @@ class TtsService extends GetxService {
     } catch (_) {}
   }
 
+  /// Silently prefetches the Lite bundle on first launch (files only, no
+  /// engine load — that happens on first Lite use). Never re-downloads a
+  /// complete bundle; failures stay silent, the tile retries.
+  Future<void> _prefetchLiteBundle() async {
+    final files = await EburonVoixLiteFiles.locate(await _liteDir);
+    if (files != null && _hasEspeak(files)) {
+      liteDownloaded.value = true;
+      return;
+    }
+    _log.info('[TTS] prefetching EburonVoix-Lite bundle…');
+    await downloadLiteVoice(loadEngine: false);
+  }
+
   /// Ensures the Lite voice is downloaded AND loaded. Reuses on-disk files
   /// (never re-downloads a complete bundle) — this is the single entry
   /// point the settings tile uses.
@@ -798,10 +816,11 @@ class TtsService extends GetxService {
 
   /// Downloads the Piper nl_BE bundle (+ espeak data if the bundle lacks
   /// it) into app-private on-device storage (`<models>/eburonvoix-lite/`,
-  /// no permissions needed), extracts, validates, and loads the engine so
-  /// the voice is immediately usable. Skips the download when a complete
+  /// no permissions needed), extracts, validates, and — unless
+  /// [loadEngine] is false (silent prefetch) — loads the engine so the
+  /// voice is immediately usable. Skips the download when a complete
   /// bundle is already on disk.
-  Future<EburonVoixLiteFiles> downloadLiteVoice() async {
+  Future<EburonVoixLiteFiles> downloadLiteVoice({bool loadEngine = true}) async {
     if (liteState.value == 'downloading') {
       throw 'Download already in progress.';
     }
@@ -855,8 +874,9 @@ class TtsService extends GetxService {
       _liteCancel = null;
       if (liteState.value == 'downloading') liteState.value = 'idle';
     }
-    // Load immediately so a finished download is usable, not stranded.
-    await _ensureLiteEngine();
+    // Load immediately so a finished download is usable, not stranded
+    // (skipped for silent prefetches — first Lite use loads then).
+    if (loadEngine) await _ensureLiteEngine();
     final ready = await EburonVoixLiteFiles.locate(await _liteDir);
     if (ready == null) throw 'Voice files vanished after download.';
     return ready;
