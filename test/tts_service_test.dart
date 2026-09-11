@@ -46,6 +46,28 @@ void main() {
       expect(out.contains('Titel'), isTrue);
       expect(out.contains('link'), isTrue);
     });
+
+    test('converts ellipsis and roleplay markers to expression tags', () {
+      final out =
+          TtsService.speakableText('Wacht... *sigh* ik kom eraan.');
+      expect(out, contains('<breath>'));
+      expect(out, contains('<sigh>'));
+      expect(out.contains('*'), isFalse);
+    });
+
+    test('leaves non-expression markers as plain words', () {
+      final out = TtsService.speakableText('Dit is *bold* tekst.');
+      expect(out, contains('bold'));
+      expect(out.contains('*'), isFalse);
+      expect(out.contains('<'), isFalse);
+    });
+
+    test('maps Dutch markers to laugh and breath', () {
+      final out =
+          TtsService.speakableText('*lacht* Dat is grappig. *ademt* Oké.');
+      expect(out, contains('<laugh>'));
+      expect(out, contains('<breath>'));
+    });
   });
 
   group('Supertonic languages', () {
@@ -265,9 +287,10 @@ void main() {
       final s = TtsService.takeLiveSlice(long, '');
       expect(s.ready.length, 1);
       expect(s.consumed.isNotEmpty, isTrue);
-      // The remainder stays queued for the next feed, not repeated.
-      final next = TtsService.takeLiveSlice('$long en meer', s.consumed);
-      expect(next.ready.join(' '), isNot(contains('woord woord woord')));
+      // Short follow-ups stay held, never repeated.
+      final next = TtsService.takeLiveSlice('${s.consumed} en meer', s.consumed);
+      expect(next.ready, isEmpty);
+      expect(next.consumed, s.consumed);
     });
 
     test('finalLiveChunks flushes the partial tail once', () {

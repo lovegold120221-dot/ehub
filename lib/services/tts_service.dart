@@ -46,6 +46,10 @@ class TtsService extends GetxService {
   final liteState = 'idle'.obs; // idle | downloading | loading | ready | error
   final liteError = ''.obs;
   final liteProgress = 0.0.obs;
+  /// True when the voice bundle + espeak data are on disk in app-private
+  /// storage, even if the engine isn't loaded yet. This is what was
+  /// missing: downloads used to look absent after finishing.
+  final liteDownloaded = false.obs;
   final rate = AppConstants.defaultTtsRate.obs; // neural speed 0.7–2.0
   final autoRead = AppConstants.defaultTtsAutoRead.obs;
   final isSpeaking = false.obs;
@@ -198,6 +202,10 @@ class TtsService extends GetxService {
   var _liveLastFeedMs = 0;
   LiveSynth? _liveSynth;
 
+  /// Text of the in-flight prefetched chunk ([_pumpLive]): only reused when
+  /// the queue head still matches, otherwise dropped — never repeat speech.
+  String? _pendingText;
+
   static const _liveFeedMinIntervalMs = 350;
 
   /// Starts a live read-aloud session for a new model response. No-op
@@ -254,6 +262,7 @@ class TtsService extends GetxService {
     _liveLatestRaw = '';
     _liveLastFeedMs = 0;
     _liveSynth = synth;
+    _pendingText = null;
     _stopRequested = false;
     isSpeaking.value = true;
     _kickLivePump();
@@ -322,7 +331,13 @@ class TtsService extends GetxService {
   /// Sequential pump: synthesize each queued chunk and play it through the
   /// shared WAV pipeline. Stale runs (superseded by stop/speak/begin) exit
   /// without touching the newer session's flags.
+  /// Sequential pump with next-chunk prefetch: while chunk N plays,
+  /// chunk N+1 already synthesizes, so inference latency hides behind audio
+  /// instead of surfacing as a pause between sentences. Stale runs
+  /// (superseded by stop/speak/begin) exit without touching the newer
+  /// session's flags; an in-flight prefetch is always dropped silently.
   Future<void> _pumpLive(int run, LiveSynth synth) async {
+    Future<({List<double> samples, int sampleRate})>? pending;
     try {
       final player = await _player();
       final chunkFile = await _chunkFile();
@@ -334,10 +349,26 @@ class TtsService extends GetxService {
         }
         final chunk = _liveQueue.removeFirst();
         if (chunk.trim().isEmpty) continue;
+        Future<({List<double> samples, int sampleRate})> current;
+        if (pending != null && _pendingText == chunk) {
+          current = pending;
+        } else {
+          pending?.ignore();
+          current = synth(chunk);
+        }
+        pending = null;
+        _pendingText = null;
+        // Prefetch the follower while the current synthesizes/plays.
+        if (_liveQueue.isNotEmpty &&
+            run == _liveRunId &&
+            !_stopRequested) {
+          _pendingText = _liveQueue.first;
+          pending = synth(_pendingText!);
+        }
         List<double> wav;
         int sr;
         try {
-          final r = await synth(chunk);
+          final r = await current;
           wav = r.samples;
           sr = r.sampleRate;
         } catch (e) {
@@ -349,6 +380,11 @@ class TtsService extends GetxService {
         if (!await _playChunk(wav, sr, player, chunkFile)) break;
       }
     } finally {
+      pending?.ignore();
+      // [pending] is pump-local; only the current run may clear the shared
+      // prefetch tag, otherwise a stale pump would drop the new session's
+      // in-flight synthesis.
+      if (run == _liveRunId) _pendingText = null;
       if (run == _liveRunId) {
         _livePumping = false;
         _liveActive = false;
@@ -383,7 +419,7 @@ class TtsService extends GetxService {
   static ({List<String> ready, String consumed}) takeLiveSlice(
     String cleaned,
     String consumed, [
-    int maxLen = 300,
+    int maxLen = 180,
   ]) {
     var start = 0;
     if (consumed.isNotEmpty) {
@@ -497,6 +533,62 @@ class TtsService extends GetxService {
     return !_stopRequested;
   }
 
+  /// Plays [chunks] back-to-back with next-chunk prefetch: chunk N+1
+  /// synthesizes while chunk N plays, hiding inference latency between
+  /// sentences instead of pausing. A failed chunk aborts the rest; an
+  /// in-flight prefetch is always dropped silently on stop/error.
+  Future<void> _playChunksPipelined({
+    required List<String> chunks,
+    required String logLabel,
+    required Future<({List<double> samples, int sampleRate})> Function(
+            String chunk)
+        synth,
+  }) async {
+    final player = await _player();
+    final chunkFile = await _chunkFile();
+    Future<({List<double> samples, int sampleRate})>? pending;
+    try {
+      for (var ci = 0; ci < chunks.length; ci++) {
+        if (_stopRequested) {
+          pending?.ignore();
+          pending = null;
+          break;
+        }
+        final current = pending ?? synth(chunks[ci]);
+        pending = null;
+        if (ci + 1 < chunks.length && !_stopRequested) {
+          pending = synth(chunks[ci + 1]);
+        }
+        List<double> wav;
+        int sr;
+        try {
+          final r = await current;
+          wav = r.samples;
+          sr = r.sampleRate;
+        } catch (e) {
+          _log.error('[TTS] $logLabel synthesis failed', details: e);
+          pending?.ignore();
+          pending = null;
+          break;
+        }
+        if (_stopRequested) {
+          pending?.ignore();
+          pending = null;
+          break;
+        }
+        _log.info('[TTS] $logLabel chunk ${ci + 1}/${chunks.length}: '
+            '${wav.length} samples');
+        if (!await _playChunk(wav, sr, player, chunkFile)) {
+          pending?.ignore();
+          pending = null;
+          break;
+        }
+      }
+    } finally {
+      pending?.ignore();
+    }
+  }
+
   /// Test the current engine: Flemish sample for nl, English otherwise.
   Future<void> testVoice() async {
     if (language.value == 'nl') {
@@ -582,23 +674,23 @@ class TtsService extends GetxService {
     isSpeaking.value = true;
     try {
       final style = await _loadNeuralStyle();
-      final player = await _player();
-      final chunkFile = await _chunkFile();
-      for (var ci = 0; ci < chunks.length; ci++) {
-        if (_stopRequested) break;
-        final wav = await _neural!.synthesize(
-          chunks[ci],
-          style: style,
-          lang: _neuralLang(),
-          speed: rate.value,
-        );
-        if (_stopRequested) break;
-        _log.info('[TTS] neural chunk ${ci + 1}/${chunks.length}: '
-            '${wav.length} samples');
-        if (!await _playChunk(wav, _neural!.sampleRate, player, chunkFile)) {
-          break;
-        }
-      }
+      final lang = _neuralLang();
+      final speed = rate.value;
+      final neural = _neural!;
+      final sr = neural.sampleRate;
+      await _playChunksPipelined(
+        chunks: chunks,
+        logLabel: 'neural',
+        synth: (c) async {
+          final wav = await neural.synthesize(
+            c,
+            style: style,
+            lang: lang,
+            speed: speed,
+          );
+          return (samples: wav, sampleRate: sr);
+        },
+      );
     } catch (e) {
       _log.error('[TTS] Neural synthesis failed', details: e);
       Get.snackbar('Voice error', '$e',
@@ -629,6 +721,7 @@ class TtsService extends GetxService {
   Future<void> refreshLiteStatus() async {
     try {
       final files = await EburonVoixLiteFiles.locate(await _liteDir);
+      liteDownloaded.value = files != null && _hasEspeak(files);
       if (files == null && liteState.value == 'ready') {
         liteState.value = 'idle';
         _lite?.dispose();
@@ -637,14 +730,34 @@ class TtsService extends GetxService {
     } catch (_) {}
   }
 
+  /// Ensures the Lite voice is downloaded AND loaded. Reuses on-disk files
+  /// (never re-downloads a complete bundle) — this is the single entry
+  /// point the settings tile uses.
+  Future<void> ensureLiteReady() async {
+    final files = await EburonVoixLiteFiles.locate(await _liteDir);
+    if (files != null && _hasEspeak(files)) {
+      liteDownloaded.value = true;
+      await _ensureLiteEngine();
+      return;
+    }
+    await downloadLiteVoice();
+  }
+
   String get liteStatusText {
+    if (liteDownloaded.value &&
+        liteState.value != 'ready' &&
+        liteState.value != 'downloading' &&
+        liteState.value != 'loading' &&
+        liteState.value != 'error') {
+      return 'Downloaded in app storage · tap to load';
+    }
     return switch (liteState.value) {
       'downloading' =>
-        'Downloading… ${(liteProgress.value * 100).toStringAsFixed(0)}%',
+        'Downloading… ${(liteProgress.value * 100).toStringAsFixed(0)}% (tap to cancel)',
       'loading' => 'Loading Flemish voice…',
       'ready' => 'Flemish voice ready · offline',
       'error' => liteError.value.isEmpty
-          ? 'Voice error — tap to retry download'
+          ? 'Voice error — tap to retry'
           : liteError.value,
       _ => 'Flemish voice not downloaded (~21 MB)',
     };
@@ -676,45 +789,77 @@ class TtsService extends GetxService {
     }
   }
 
+  CancelToken? _liteCancel;
+
+  /// Cancels an in-progress Lite voice download.
+  void cancelLiteDownload() {
+    _liteCancel?.cancel('cancelled by user');
+  }
+
   /// Downloads the Piper nl_BE bundle (+ espeak data if the bundle lacks
-  /// it), extracts into `<models>/eburonvoix-lite/`, and returns the
-  /// located voice files.
+  /// it) into app-private on-device storage (`<models>/eburonvoix-lite/`,
+  /// no permissions needed), extracts, validates, and loads the engine so
+  /// the voice is immediately usable. Skips the download when a complete
+  /// bundle is already on disk.
   Future<EburonVoixLiteFiles> downloadLiteVoice() async {
+    if (liteState.value == 'downloading') {
+      throw 'Download already in progress.';
+    }
     liteState.value = 'downloading';
     liteError.value = '';
     liteProgress.value = 0.0;
+    final cancel = _liteCancel = CancelToken();
     try {
       final dir = await _liteDir;
-      await _downloadAndExtract(
-        AppConstants.liteBundleUrl,
-        dir,
-        0.0,
-        0.85,
-      );
       var files = await EburonVoixLiteFiles.locate(dir);
       if (files == null || !_hasEspeak(files)) {
         await _downloadAndExtract(
-          AppConstants.liteEspeakUrl,
-          '$dir/espeak-ng-data',
+          AppConstants.liteBundleUrl,
+          dir,
+          0.0,
           0.85,
-          1.0,
+          cancel,
         );
         files = await EburonVoixLiteFiles.locate(dir);
+        if (files == null || !_hasEspeak(files)) {
+          await _downloadAndExtract(
+            AppConstants.liteEspeakUrl,
+            '$dir/espeak-ng-data',
+            0.85,
+            1.0,
+            cancel,
+          );
+          files = await EburonVoixLiteFiles.locate(dir);
+        }
       }
       final located = files;
       if (located == null || !_hasEspeak(located)) {
         throw 'Voice files incomplete after download. Delete and retry.';
       }
+      liteDownloaded.value = true;
       await refreshLiteStatus();
-      return located;
+      _log.info('[TTS] EburonVoix-Lite bundle on disk, loading engine…');
     } catch (e) {
-      liteState.value = 'error';
-      liteError.value = '$e';
+      // User-cancelled downloads go quietly back to idle; real failures
+      // surface as errors with a retry path.
+      if ('$e'.contains('cancelled')) {
+        liteState.value = 'idle';
+        liteError.value = '';
+      } else {
+        liteState.value = 'error';
+        liteError.value = '$e';
+      }
       _log.error('[TTS] Lite voice download failed', details: e);
       rethrow;
     } finally {
+      _liteCancel = null;
       if (liteState.value == 'downloading') liteState.value = 'idle';
     }
+    // Load immediately so a finished download is usable, not stranded.
+    await _ensureLiteEngine();
+    final ready = await EburonVoixLiteFiles.locate(await _liteDir);
+    if (ready == null) throw 'Voice files vanished after download.';
+    return ready;
   }
 
   bool _hasEspeak(EburonVoixLiteFiles files) =>
@@ -725,6 +870,7 @@ class TtsService extends GetxService {
     String destDir,
     double from,
     double to,
+    CancelToken cancel,
   ) async {
     final tmpFile =
         File('$destDir/.download-${DateTime.now().millisecondsSinceEpoch}');
@@ -732,16 +878,33 @@ class TtsService extends GetxService {
       await Dio().download(
         url,
         tmpFile.path,
+        cancelToken: cancel,
+        deleteOnError: true,
+        options: Options(
+          sendTimeout: const Duration(seconds: 30),
+          receiveTimeout: const Duration(minutes: 15),
+        ),
         onReceiveProgress: (received, total) {
           if (total > 0) {
             liteProgress.value = from + (to - from) * received / total;
           }
         },
       );
+      if (cancel.isCancelled) throw 'Download cancelled.';
       final bytes = await tmpFile.readAsBytes();
+      // Reject server error pages before touching the extractor: bzip2
+      // streams always start with the 'BZh' magic.
+      if (bytes.length < 10 ||
+          bytes[0] != 0x42 || // B
+          bytes[1] != 0x5A || // Z
+          bytes[2] != 0x68) {
+        // h
+        throw 'Voice server returned an error page — check connection and retry.';
+      }
       final tarBytes = BZip2Decoder().decodeBytes(bytes);
       final archive = TarDecoder().decodeBytes(tarBytes);
       for (final file in archive.files) {
+        if (cancel.isCancelled) throw 'Download cancelled.';
         if (!file.isFile) continue;
         final out = File('$destDir/${file.name}');
         await out.parent.create(recursive: true);
@@ -779,20 +942,19 @@ class TtsService extends GetxService {
     try {
       final lite = _lite;
       if (lite == null) throw 'Lite engine is not loaded.';
-      final player = await _player();
-      final chunkFile = await _chunkFile();
-      for (var ci = 0; ci < chunks.length; ci++) {
-        if (_stopRequested) break;
-        final utterance =
-            await Future(() => lite.synthesize(chunks[ci], speed: rate.value));
-        if (_stopRequested) break;
-        _log.info('[TTS] lite chunk ${ci + 1}/${chunks.length}: '
-            '${utterance.samples.length} samples');
-        if (!await _playChunk(
-            utterance.samples, utterance.sampleRate, player, chunkFile)) {
-          break;
-        }
-      }
+      final speed = rate.value;
+      await _playChunksPipelined(
+        chunks: chunks,
+        logLabel: 'lite',
+        synth: (c) async {
+          final utterance =
+              await Future(() => lite.synthesize(c, speed: speed));
+          return (
+            samples: utterance.samples,
+            sampleRate: utterance.sampleRate
+          );
+        },
+      );
     } catch (e) {
       _log.error('[TTS] Lite synthesis failed', details: e);
       Get.snackbar('Voice error', '$e',
@@ -807,8 +969,9 @@ class TtsService extends GetxService {
 
   /// Splits [text] into sentence-aware chunks of at most [maxLen] chars so
   /// long answers stream as continuous speech instead of one giant
-  /// utterance. Pure (unit-tested).
-  static List<String> splitIntoChunks(String text, [int maxLen = 300]) {
+  /// utterance. 180 chars (~12 s audio) keeps per-chunk inference latency
+  /// low so pipelined playback never starves. Pure (unit-tested).
+  static List<String> splitIntoChunks(String text, [int maxLen = 180]) {
     final cleaned = text.replaceAll(RegExp(r'\s+'), ' ').trim();
     if (cleaned.isEmpty) return [];
     final sentences = cleaned
@@ -853,7 +1016,44 @@ class TtsService extends GetxService {
     return parts;
   }
 
+  /// Roleplay markers (`*sigh*`, `*lacht*`, …) mapped to the engine's
+  /// expression tags. Anything else in asterisks keeps the old behavior
+  /// (markers stripped, word spoken). Pure (unit-tested).
+  static const _expressionMarkers = <String, String>{
+    'sigh': 'sigh',
+    'sighs': 'sigh',
+    'sighed': 'sigh',
+    'sighing': 'sigh',
+    'zucht': 'sigh',
+    'zuchtte': 'sigh',
+    'zuchtend': 'sigh',
+    'laugh': 'laugh',
+    'laughs': 'laugh',
+    'laughed': 'laugh',
+    'laughing': 'laugh',
+    'lacht': 'laugh',
+    'lachte': 'laugh',
+    'lachend': 'laugh',
+    'giggle': 'laugh',
+    'giggles': 'laugh',
+    'giggled': 'laugh',
+    'grinnikt': 'laugh',
+    'grinnikte': 'laugh',
+    'breath': 'breath',
+    'breathed': 'breath',
+    'breathing': 'breath',
+    'adem': 'breath',
+    'ademt': 'breath',
+    'ademend': 'breath',
+    'gasp': 'breath',
+    'gasps': 'breath',
+    'hijgt': 'breath',
+  };
+
   /// Strips reasoning traces and markdown so TTS reads words, not syntax.
+  /// Humanizing: `...`/`…` becomes an audible `<breath>`, and `*sigh*`-style
+  /// roleplay markers become the matching expression tag (EburonVoix-3
+  /// renders them; Lite strips them silently instead of reading them aloud).
   static String speakableText(String text) {
     var out = text
         .replaceAll(RegExp(r'<think>[\s\S]*?</think>'), ' ')
@@ -864,6 +1064,11 @@ class TtsService extends GetxService {
     out = out.replaceAllMapped(
         RegExp(r'\[([^\]]*)\]\([^)]*\)'), (m) => m.group(1) ?? '');
     out = out.replaceAll(RegExp(r'^#{1,6}\s*', multiLine: true), '');
+    out = out.replaceAll(RegExp(r'\.{2,}|…'), ' <breath> ');
+    out = out.replaceAllMapped(RegExp(r'\*([A-Za-z]+)\*'), (m) {
+      final tag = _expressionMarkers[(m.group(1) ?? '').toLowerCase()];
+      return tag == null ? ' ${m.group(1)} ' : ' <$tag> ';
+    });
     out = out.replaceAll(RegExp(r'[*_~]{1,3}'), '');
     out = out.replaceAll(RegExp(r'^\s*[-*+]\s+', multiLine: true), '');
     out = out.replaceAll(RegExp(r'^\s*\d+[.)]\s+', multiLine: true), '');

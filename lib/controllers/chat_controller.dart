@@ -563,6 +563,14 @@ class ChatController extends GetxController {
 
       String rawResponse;
 
+      // Conversation memory: past chats recalled into the system prompt so
+      // the model answers with continuity, capped small so the current
+      // conversation always dominates the context window.
+      final memory = _memoryBlock();
+      final systemWithMemory = memory.isEmpty
+          ? _effectiveSystemPrompt
+          : '$_effectiveSystemPrompt\n\n$memory';
+
       // Build conversation history
       final history = messages
           .where((m) => m.role == 'user' || m.role == 'assistant')
@@ -661,7 +669,7 @@ class ChatController extends GetxController {
 
           rawResponse = await inference.generate(
             prompt: effectiveText,
-            systemPrompt: _effectiveSystemPrompt,
+            systemPrompt: systemWithMemory,
             conversationHistory: history,
             source: 'chat',
             imagePath: imagePath,
@@ -678,7 +686,7 @@ class ChatController extends GetxController {
       } else {
         final cloud = Get.find<CloudService>();
         final apiMessages = [
-          {'role': 'system', 'content': _effectiveSystemPrompt},
+          {'role': 'system', 'content': systemWithMemory},
           ...history,
         ];
         rawResponse = await cloud.sendMessage(
@@ -901,6 +909,71 @@ class ChatController extends GetxController {
     return settings.effectiveSystemPromptForModel(
       modelName,
     );
+  }
+
+  /// Recalls the most recent past conversations (never the current chat)
+  /// as a compact system-prompt block. Skips command output, errors, and
+  /// image payloads; trims every message so memory stays small. Pure
+  /// formatting core is [buildMemoryBlock] (unit-tested).
+  String _memoryBlock() {
+    var enabled = AppConstants.defaultMemoryEnabled;
+    try {
+      enabled = Get.find<SettingsController>().memoryEnabled.value;
+    } catch (_) {}
+    if (!enabled) return '';
+    final past =
+        <({String title, List<({String role, String content})> messages})>[];
+    for (final s in sessions) {
+      if (s.id == currentSessionId.value) continue;
+      if (past.length >= AppConstants.memoryMaxSessions) break;
+      List<Map<dynamic, dynamic>> raw;
+      try {
+        raw = _hive.getMessagesForChat(s.id);
+      } catch (_) {
+        continue;
+      }
+      final kept = <({String role, String content})>[];
+      for (final m in raw.reversed) {
+        if (kept.length >= AppConstants.memoryMaxMessagesPerSession) break;
+        final msg = ChatMessage.fromMap(m);
+        if (msg.role != 'user' && msg.role != 'assistant') continue;
+        var text = msg.content.trim();
+        if (text.isEmpty ||
+            text.startsWith('❌') ||
+            text.startsWith('[IMAGE_BASE64]')) {
+          continue;
+        }
+        if (text.length > AppConstants.memoryMaxMessageChars) {
+          text = '${text.substring(0, AppConstants.memoryMaxMessageChars)}…';
+        }
+        kept.add((role: msg.role, content: text));
+      }
+      if (kept.isEmpty) continue;
+      past.add((title: s.title, messages: kept.reversed.toList()));
+    }
+    return buildMemoryBlock(past);
+  }
+
+  /// Formats recalled chats into one system-prompt block, hard-capped at
+  /// [maxChars]. Pure (unit-tested).
+  static String buildMemoryBlock(
+    List<({String title, List<({String role, String content})> messages})>
+        past, {
+    int maxChars = AppConstants.memoryMaxTotalChars,
+  }) {
+    if (past.isEmpty) return '';
+    final buf = StringBuffer(
+        'Context from your past conversations with this user (for continuity; the current chat follows separately):');
+    for (final p in past) {
+      buf.write('\n\n[Past chat: "${p.title}"]');
+      for (final m in p.messages) {
+        buf.write('\n${m.role}: ${m.content}');
+      }
+      if (buf.length >= maxChars) break;
+    }
+    var out = buf.toString();
+    if (out.length > maxChars) out = '${out.substring(0, maxChars)}…';
+    return out;
   }
 
   String _attachmentTypeForExtension(String extension) {

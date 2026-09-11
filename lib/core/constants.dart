@@ -62,6 +62,14 @@ class AppConstants {
   static const String keyTtsNeuralVoice = 'tts_neural_voice'; // F1..M5
   static const String keyTtsRate = 'tts_rate'; // neural speed 0.7–2.0
   static const String keyTtsAutoRead = 'tts_auto_read';
+  static const String keyMemoryEnabled = 'memory_enabled';
+
+  // Conversation memory: past chats recalled into the system prompt.
+  static const bool defaultMemoryEnabled = true;
+  static const int memoryMaxSessions = 3; // most recent past chats
+  static const int memoryMaxMessagesPerSession = 4; // last exchanges
+  static const int memoryMaxMessageChars = 300; // per-message trim
+  static const int memoryMaxTotalChars = 2000; // whole memory block
 
   // Default Model Config
   static const double defaultTemperature = 0.7;

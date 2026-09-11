@@ -147,6 +147,25 @@ class SettingsView extends GetView<SettingsController> {
                       ]),
                 ),
               ]),
+              const SizedBox(height: 10),
+              _appleGroupedCard(context, isDark, children: [
+                _appleListTile(
+                  context,
+                  isDark,
+                  leading: _iconBox(
+                      AppColors.primary, Icons.psychology_rounded),
+                  title: 'Conversation memory',
+                  subtitle:
+                      'Recall past chats for context · stays on this device',
+                  trailing: Switch(
+                    value: controller.memoryEnabled.value,
+                    activeThumbColor: AppColors.primary,
+                    onChanged: (v) => controller.setMemoryEnabled(v),
+                  ),
+                  onTap: () => controller.setMemoryEnabled(
+                      !controller.memoryEnabled.value),
+                ),
+              ]),
               const SizedBox(height: 24),
               _sectionLabel(context, 'MODEL PARAMETERS'),
               _buildLiteRtCard(context, isDark),
@@ -1318,19 +1337,24 @@ class SettingsView extends GetView<SettingsController> {
                         size: 20, color: AppColors.success)
                     : const Icon(Icons.download_outlined, size: 20),
             showDivider: false,
-            onTap: tts.liteState.value == 'downloading' || tts.isLiteUsable
-                ? null
-                : () async {
-                    try {
-                      await tts.downloadLiteVoice();
-                      Get.snackbar('EburonVoix-Lite',
-                          'Flemish voice downloaded.',
-                          snackPosition: SnackPosition.BOTTOM);
-                    } catch (e) {
-                      Get.snackbar('Download failed', '$e',
-                          snackPosition: SnackPosition.BOTTOM);
-                    }
-                  },
+            onTap: tts.liteState.value == 'downloading'
+                ? () => tts.cancelLiteDownload()
+                : tts.isLiteUsable
+                    ? null
+                    : () async {
+                        try {
+                          await tts.ensureLiteReady();
+                          Get.snackbar('EburonVoix-Lite',
+                              'Flemish voice ready · offline',
+                              snackPosition: SnackPosition.BOTTOM);
+                        } catch (e) {
+                          final msg = '$e'.contains('cancelled')
+                              ? 'Download cancelled.'
+                              : '$e';
+                          Get.snackbar('Download failed', msg,
+                              snackPosition: SnackPosition.BOTTOM);
+                        }
+                      },
           ),
         ]))
       ]);

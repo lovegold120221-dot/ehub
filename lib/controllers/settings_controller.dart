@@ -42,6 +42,7 @@ class SettingsController extends GetxController {
   final deepSeekModel = 'deepseek-v4-flash'.obs;
   final customCloudModel = ''.obs;
   final globalSystemPrompt = AppConstants.systemPrompt.obs;
+  final memoryEnabled = AppConstants.defaultMemoryEnabled.obs;
   final nvidiaModels = <String>[].obs;
   final isLoadingNvidiaModels = false.obs;
   final temperature = 0.1.obs;
@@ -186,6 +187,9 @@ class SettingsController extends GetxController {
     temperature.value = _hive.getSetting(AppConstants.keyTemperature,
             defaultValue: AppConstants.defaultTemperature) ??
         AppConstants.defaultTemperature;
+    memoryEnabled.value = _hive.getSetting(AppConstants.keyMemoryEnabled,
+            defaultValue: AppConstants.defaultMemoryEnabled) ??
+        AppConstants.defaultMemoryEnabled;
     maxTokens.value = _hive.getSetting(AppConstants.keyMaxTokens,
             defaultValue: AppConstants.defaultMaxTokens) ??
         AppConstants.defaultMaxTokens;
@@ -649,6 +653,11 @@ class SettingsController extends GetxController {
   Future<void> setTemperature(double value) async {
     temperature.value = value;
     await _hive.setSetting(AppConstants.keyTemperature, value);
+  }
+
+  Future<void> setMemoryEnabled(bool value) async {
+    memoryEnabled.value = value;
+    await _hive.setSetting(AppConstants.keyMemoryEnabled, value);
   }
 
   Future<void> setMaxTokens(int value) async {
