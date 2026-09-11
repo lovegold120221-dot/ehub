@@ -1,0 +1,58 @@
+name: Bootstrap verified TTS streaming fix
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/tts-fix-bootstrap.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-fix-branch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout TTS fix branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/continuous-streaming-tts
+          fetch-depth: 0
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Apply deterministic patch
+        run: python3 tool/apply_tts_streaming_fix.py
+
+      - name: Format changed Dart files
+        run: dart format lib/services/tts_service.dart test/tts_service_test.dart
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Run TTS regression tests
+        run: flutter test test/tts_service_test.dart
+
+      - name: Analyze project
+        run: flutter analyze
+
+      - name: Check patch whitespace
+        run: git diff --check
+
+      - name: Commit verified fix to feature branch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lib/services/tts_service.dart test/tts_service_test.dart
+          if git diff --cached --quiet; then
+            echo "No source changes to commit."
+            exit 0
+          fi
+          git commit -m "fix: keep streaming TTS continuously prefetched"
+          git push origin HEAD:fix/continuous-streaming-tts
