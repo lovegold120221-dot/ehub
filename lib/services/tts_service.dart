@@ -207,6 +207,10 @@ class TtsService extends GetxService {
   var _liveLastFeedMs = 0;
   LiveSynth? _liveSynth;
 
+  /// Expression tags kept for the active live session (Supertonic keeps
+  /// laugh/breath/sigh; Lite strips all). Fixed per session.
+  Set<String> _liveKeepTags = const {};
+
   /// Text of the in-flight prefetched chunk ([_pumpLive]): only reused when
   /// the queue head still matches, otherwise dropped — never repeat speech.
   String? _pendingText;
@@ -231,7 +235,7 @@ class TtsService extends GetxService {
         _startLiveSession((c) async {
           final u = await Future(() => lite.synthesize(c, speed: rate.value));
           return (samples: u.samples, sampleRate: u.sampleRate);
-        });
+        }, const {});
       } else {
         final neural = _neural;
         if (!isSupertonicUsable || neural == null) {
@@ -250,14 +254,14 @@ class TtsService extends GetxService {
             speed: speed,
           );
           return (samples: wav, sampleRate: sr);
-        });
+        }, FlemishText.supertonicExpressionTags);
       }
     } catch (e) {
       _log.error('[TTS] live read failed to start', details: e);
     }
   }
 
-  void _startLiveSession(LiveSynth synth) {
+  void _startLiveSession(LiveSynth synth, Set<String> keepTags) {
     _liveRunId++;
     _liveQueue.clear();
     _liveActive = true;
@@ -267,6 +271,7 @@ class TtsService extends GetxService {
     _liveLatestRaw = '';
     _liveLastFeedMs = 0;
     _liveSynth = synth;
+    _liveKeepTags = keepTags;
     _pendingText = null;
     _stopRequested = false;
     isSpeaking.value = true;
@@ -306,23 +311,39 @@ class TtsService extends GetxService {
   }
 
   void _ingestLive(String raw, bool finalFlush) {
-    final cleaned = FlemishText.normalize(speakableText(streamCleanText(raw)));
-    if (cleaned.isEmpty) return;
+    // Track consumption on the SPEAKABLE layer, never on normalized text:
+    // FlemishText.normalize rewrites earlier words as later tokens arrive
+    // (units, abbreviations, symbols), so offsets into normalized text go
+    // stale and starve the queue after the first sentences. Normalization
+    // instead runs per finished segment below.
+    final speakable = speakableText(streamCleanText(raw));
+    if (speakable.isEmpty) return;
     if (finalFlush) {
-      for (final c in finalLiveChunks(cleaned, _liveConsumed)) {
+      for (final c in liveReadyChunks(_tailAfter(speakable), _liveKeepTags)) {
         _liveQueue.add(c);
       }
-      _liveConsumed = cleaned;
+      _liveConsumed = speakable;
     } else {
-      final slice = takeLiveSlice(cleaned, _liveConsumed);
+      final slice = takeLiveSlice(speakable, _liveConsumed);
       for (final seg in slice.ready) {
-        for (final c in splitIntoChunks(seg)) {
+        for (final c in liveReadyChunks(seg, _liveKeepTags)) {
           _liveQueue.add(c);
         }
       }
       _liveConsumed = slice.consumed;
     }
     _kickLivePump();
+  }
+
+  /// Unconsumed tail of speakable [full]. Drops (with a log) instead of
+  /// repeating when tracking slips — silence beats duplicate speech.
+  String _tailAfter(String full) {
+    if (_liveConsumed.isEmpty) return full;
+    if (!full.startsWith(_liveConsumed)) {
+      _log.error('[TTS] live tracking slipped — dropping tail, not repeating');
+      return '';
+    }
+    return full.substring(_liveConsumed.length);
   }
 
   void _kickLivePump() {
@@ -373,16 +394,30 @@ class TtsService extends GetxService {
         List<double> wav;
         int sr;
         try {
+          final synthSw = Stopwatch()..start();
           final r = await current;
+          synthSw.stop();
           wav = r.samples;
           sr = r.sampleRate;
+          final audioMs = (wav.length / sr * 1000).round();
+          _log.info('[TTS] live chunk: synth=${synthSw.elapsedMilliseconds}ms '
+              'audio=${audioMs}ms');
         } catch (e) {
           _log.error('[TTS] live synthesis failed', details: e);
           break;
         }
         if (run != _liveRunId || _stopRequested) break;
-        _log.info('[TTS] live chunk: ${wav.length} samples @ $sr Hz');
-        if (!await _playChunk(wav, sr, player, chunkFile)) break;
+        bool played = false;
+        try {
+          played = await _playChunk(wav, sr, player, chunkFile);
+        } catch (e) {
+          _log.error('[TTS] chunk playback failed', details: e);
+          break;
+        }
+        if (!played) {
+          _log.info('[TTS] live pump stopped after chunk');
+          break;
+        }
       }
     } finally {
       pending?.ignore();
@@ -391,6 +426,8 @@ class TtsService extends GetxService {
       // in-flight synthesis.
       if (run == _liveRunId) _pendingText = null;
       if (run == _liveRunId) {
+        _log.info('[TTS] live session ended '
+            '(final=$_liveFinal, queued=${_liveQueue.length})');
         _livePumping = false;
         _liveActive = false;
         isSpeaking.value = false;
@@ -416,15 +453,17 @@ class TtsService extends GetxService {
   }
 
   /// Slices newly completed sentences off streaming text. [cleaned] is the
-  /// full cleaned response so far, [consumed] the prefix already queued.
-  /// Only text ending in a sentence boundary is returned; the trailing
-  /// partial sentence waits for more tokens. Boundary-less tails longer
-  /// than 2×[maxLen] are force-flushed so speech never stalls. Pure
-  /// (unit-tested).
+  /// full speakable (un-normalized) response so far — normalization runs
+  /// per finished segment in [liveReadyChunks], because it rewrites earlier
+  /// words as later tokens arrive and would break offset tracking.
+  /// [consumed] is the prefix already queued. Only text ending in a
+  /// sentence boundary is returned; the trailing partial sentence waits
+  /// for more tokens. Boundary-less tails longer than 2×[maxLen] are
+  /// force-flushed so speech never stalls. Pure (unit-tested).
   static ({List<String> ready, String consumed}) takeLiveSlice(
     String cleaned,
     String consumed, [
-    int maxLen = 180,
+    int maxLen = 120,
   ]) {
     var start = 0;
     if (consumed.isNotEmpty) {
@@ -459,8 +498,17 @@ class TtsService extends GetxService {
     );
   }
 
-  /// Remaining tail for [endLiveRead]: everything past [consumed],
-  /// chunked normally (partial final sentence included). Pure
+  /// Turns one finished speakable segment into playable chunks: Flemish
+  /// normalization → per-engine expression tags → bounded splitting. Runs
+  /// per segment (not on the whole response) so streaming offsets stay
+  /// valid while later tokens still arrive. Pure (unit-tested).
+  static List<String> liveReadyChunks(String segment, Set<String> keepTags) {
+    return splitIntoChunks(
+        FlemishText.filterTags(FlemishText.normalize(segment), keepTags));
+  }
+
+  /// Remaining speakable tail for [endLiveRead]: everything past
+  /// [consumed], chunked normally (partial final sentence included). Pure
   /// (unit-tested).
   static List<String> finalLiveChunks(String cleaned, String consumed) {
     var tail = cleaned;
@@ -567,9 +615,14 @@ class TtsService extends GetxService {
         List<double> wav;
         int sr;
         try {
+          final synthSw = Stopwatch()..start();
           final r = await current;
+          synthSw.stop();
           wav = r.samples;
           sr = r.sampleRate;
+          final audioMs = (wav.length / sr * 1000).round();
+          _log.info('[TTS] $logLabel chunk ${ci + 1}/${chunks.length}: '
+              'synth=${synthSw.elapsedMilliseconds}ms audio=${audioMs}ms');
         } catch (e) {
           _log.error('[TTS] $logLabel synthesis failed', details: e);
           pending?.ignore();
@@ -581,8 +634,6 @@ class TtsService extends GetxService {
           pending = null;
           break;
         }
-        _log.info('[TTS] $logLabel chunk ${ci + 1}/${chunks.length}: '
-            '${wav.length} samples');
         if (!await _playChunk(wav, sr, player, chunkFile)) {
           pending?.ignore();
           pending = null;
@@ -989,9 +1040,9 @@ class TtsService extends GetxService {
 
   /// Splits [text] into sentence-aware chunks of at most [maxLen] chars so
   /// long answers stream as continuous speech instead of one giant
-  /// utterance. 180 chars (~12 s audio) keeps per-chunk inference latency
+  /// utterance. 120 chars (~8 s audio) keeps per-chunk inference latency
   /// low so pipelined playback never starves. Pure (unit-tested).
-  static List<String> splitIntoChunks(String text, [int maxLen = 180]) {
+  static List<String> splitIntoChunks(String text, [int maxLen = 120]) {
     final cleaned = text.replaceAll(RegExp(r'\s+'), ' ').trim();
     if (cleaned.isEmpty) return [];
     final sentences = cleaned

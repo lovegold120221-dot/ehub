@@ -71,12 +71,17 @@ class LogView extends StatelessWidget {
           Container(
             height: 52,
             padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: Obx(() => ListView.builder(
+            child: Obx(() {
+              // Read synchronously: itemBuilder runs after this build
+              // completes, so reads inside it would never register with
+              // GetX (improper-use error on every open).
+              final current = selectedFilter.value;
+              return ListView.builder(
               scrollDirection: Axis.horizontal,
               itemCount: filters.length,
               itemBuilder: (context, index) {
                 final filter = filters[index];
-                final isSelected = selectedFilter.value == filter;
+                final isSelected = current == filter;
                 final color = filter == 'ALL'
                     ? (isDark ? Colors.white : Colors.black)
                     : levelColor(filter);
@@ -103,7 +108,8 @@ class LogView extends StatelessWidget {
                   ),
                 );
               },
-            )),
+            );
+            }),
           ),
           // Log list
           Expanded(

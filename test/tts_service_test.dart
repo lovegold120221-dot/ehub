@@ -310,6 +310,23 @@ void main() {
     });
   });
 
+  group('TtsService.liveReadyChunks', () {
+    test('normalizes segments and keeps tags per engine', () {
+      const seg = 'Het kost 5 kg. <breath> Mooi.';
+      final neural = TtsService.liveReadyChunks(
+          seg, FlemishText.supertonicExpressionTags);
+      expect(neural.join(' '), contains('kilo'));
+      expect(neural.join(' '), contains('<breath>'));
+      final lite = TtsService.liveReadyChunks(seg, const {});
+      expect(lite.join(' '), contains('kilo'));
+      expect(lite.join(' ').contains('<breath>'), isFalse);
+    });
+
+    test('handles empty segments', () {
+      expect(TtsService.liveReadyChunks('   ', const {}), isEmpty);
+    });
+  });
+
   group('encodeWav16', () {
     test('fades chunk edges to prevent joint clicks', () {
       final samples = Float32List.fromList(List.filled(4410, 0.5));
