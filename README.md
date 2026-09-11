@@ -1,6 +1,16 @@
 # EburonHub
 
+[![GitHub release](https://img.shields.io/github/v/release/lovegold120221-dot/ehub?style=for-the-badge&logo=android&logoColor=white)](https://github.com/lovegold120221-dot/ehub/releases)
 
+A production-ready, cross-platform AI chat client built with Flutter. It unifies local on-device LLM inference (Android) with cloud API access, giving users full control over how their models run.
+
+![Image generation tested on Moto G71 (Snapdragon), Oneplus 10r (Mediatek), Pixel 6A (Tensor), Poco F1 (Snapdragon), Samsung s23 (Snapdragon) 4 steps fast](EburonHub.png)
+_Image generation tested on Moto G71 (Snapdragon), Oneplus 10r (Mediatek), Pixel 6A (Tensor), Poco F1 (Snapdragon), Samsung s23 (Snapdragon) 4 steps fast_
+
+![Generated on pixel 6 with 20 step](IMG_2390.png)
+_Generated on pixel 6 with 20 step_
+
+---
 
 ## What It Does
 
@@ -11,6 +21,13 @@
 - **Background Services** — Firebase Cloud Messaging integration for push updates and background task handling.
 - **Smart Auto-Configuration** — On first launch, the app detects your device's RAM and recommends optimal context size and token limits automatically.
 - **Task Management** — A dedicated task view for structured AI-assisted workflows alongside free-form chat.
+- **Voice Read-Aloud** — On-device neural voices (EburonVoix-3, EburonVoix-Lite). New answers are narrated while they stream (Auto mode, default) or on tap of the speaker icon (Manual mode), and keep playing in the background.
+
+---
+
+## Download
+
+Grab the latest Android APK from the [Releases](https://github.com/lovegold120221-dot/ehub/releases) page — use `app-arm64-v8a-release.apk` on modern phones. Every APK ships with a `.sha1` file so you can verify the download.
 
 ---
 
@@ -98,7 +115,7 @@ The `InferenceService` exposes `supportsLocalInference` so the UI can hide local
 
 ### iOS / iPad
 
-The iPad release is distributed as a standalone ZIP package for sideloading. Download the latest `EburonHub-iOS.zip` from the [Releases](https://github.com/orailnoor/cross-platform-llm-client/releases) page, extract it, and install the `.ipa` via AltStore, Sideloadly, or Xcode. iPhone support is experimental — iPad is the recommended iOS target due to RAM requirements for local models.
+The iPad release is distributed as a standalone ZIP package for sideloading. Download the latest `EburonHub-iOS.zip` from the [Releases](https://github.com/lovegold120221-dot/ehub/releases) page, extract it, and install the `.ipa` via AltStore, Sideloadly, or Xcode. iPhone support is experimental — iPad is the recommended iOS target due to RAM requirements for local models.
 
 ---
 
