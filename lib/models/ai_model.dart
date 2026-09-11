@@ -25,6 +25,7 @@ class AiModel {
     'llama-3.2-3b-instruct-uncensored-q4_k_m.gguf': 'Eburon-Betelgeuse',
     'llama-3.2-1b-instruct-q4_k_m.gguf': 'Eburon-Proxima',
     'DreamShaper8_LCM.safetensors': 'Eburon-Nebula',
+    'DreamShaper8_LCM_q8_0.gguf': 'Eburon-Nebula-Q8',
     'CyberRealistic_V8_FP16.safetensors': 'Eburon-Supernova',
     'Realistic_Vision_V5.1_fp16-no-ema.safetensors': 'Eburon-Mira',
     'AbsoluteReality_1.8.1_pruned.safetensors': 'Eburon-Atlas',

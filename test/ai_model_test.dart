@@ -45,6 +45,12 @@ void main() {
             .displayName,
         'Eburon-Nebula',
       );
+      expect(
+        model('DreamShaper 8 LCM Q8 (SD 1.5 · mobile)',
+                'DreamShaper8_LCM_q8_0.gguf')
+            .displayName,
+        'Eburon-Nebula-Q8',
+      );
     });
 
     test('falls back to the raw name for custom/imported models', () {

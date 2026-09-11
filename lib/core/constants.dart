@@ -325,6 +325,16 @@ class AppConstants {
       'template': 'llama3',
     },
     {
+      'name': 'DreamShaper 8 LCM Q8 (SD 1.5 · mobile)',
+      'filename': 'DreamShaper8_LCM_q8_0.gguf',
+      'url':
+          'https://huggingface.co/haven-ai-companion/dreamshaper8-lcm-gguf/resolve/main/DreamShaper8_LCM_q8_0.gguf',
+      'size': '1.7 GB',
+      'description':
+          'Same DreamShaper 8 LCM weights, pre-quantized Q8 for phones — loads with far less RAM, 4-step generation',
+      'template': 'sd',
+    },
+    {
       'name': 'DreamShaper 8 LCM (SD 1.5)',
       'filename': 'DreamShaper8_LCM.safetensors',
       'url':
