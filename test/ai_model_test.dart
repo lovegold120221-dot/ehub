@@ -41,6 +41,13 @@ void main() {
       expect(m.runtime, AiModel.runtimeLlama);
     });
 
+    test('brands the install-option Qwen as Eburon-Mantis', () {
+      final m = model('Qwen2.5-0.5B Instruct (Q4_K_M)',
+          'qwen2.5-0.5b-instruct-q4_k_m.gguf');
+      expect(m.displayName, 'Eburon-Mantis');
+      expect(m.hasEburonAlias, isTrue);
+    });
+
     test('covers vision and image catalog models', () {
       expect(
         model('Qwen2-VL-2B Instruct (Q4_K_M)',

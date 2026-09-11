@@ -378,11 +378,26 @@ class ModelController extends GetxController {
       if (!await _download.isModelDownloaded(edge.filename)) {
         Get.snackbar(
           'Eburon Edge',
-          'Downloading the default on-device assistant…',
+          'Downloading the default on-device assistant… (continues in background)',
           snackPosition: SnackPosition.BOTTOM,
           duration: const Duration(seconds: 3),
         );
-        await _download.downloadModel(url: edge.url, filename: edge.filename);
+        try {
+          await _download.downloadModel(url: edge.url, filename: edge.filename);
+        } catch (e) {
+          Get.find<AppLogService>()
+              .error('Edge download failed to start', details: e);
+          return;
+        }
+        await refreshDownloaded();
+        // Native Android downloads run in the system DownloadManager and
+        // return immediately — wait for the file to actually land before
+        // loading, otherwise we'd try to load a half-written model.
+        if (!await _waitForDownload(edge)) {
+          Get.find<AppLogService>().error(
+              'Edge download did not finish', details: edge.filename);
+          return;
+        }
         await refreshDownloaded();
       }
       if (_inference.isLoadingModel.value || _inference.isModelLoaded.value) {
@@ -415,6 +430,33 @@ class ModelController extends GetxController {
       Get.find<AppLogService>()
           .error('Edge auto-setup failed', details: e);
     }
+  }
+
+  /// Waits for a native background download to land as a complete file.
+  /// The native downloader assembles elsewhere and finalizes by rename, so
+  /// once the file reaches its declared size and stays put, it's done.
+  /// Times out after 30 minutes — the next launch retries.
+  Future<bool> _waitForDownload(AiModel model) async {
+    final expected = _declaredModelBytes(model);
+    if (expected <= 0) return false;
+    final target = (expected * 0.85).round();
+    final deadline = DateTime.now().add(const Duration(minutes: 30));
+    while (DateTime.now().isBefore(deadline)) {
+      await Future.delayed(const Duration(seconds: 3));
+      int size = 0;
+      try {
+        size = await _download.getModelSize(model.filename);
+      } catch (_) {}
+      if (size < target) continue;
+      // Reached size — confirm it's stable (finalized, not mid-rename).
+      await Future.delayed(const Duration(seconds: 3));
+      int again = 0;
+      try {
+        again = await _download.getModelSize(model.filename);
+      } catch (_) {}
+      if (again >= target) return true;
+    }
+    return false;
   }
 
   Future<void> downloadModel(AiModel model) async {
