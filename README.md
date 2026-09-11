@@ -1,16 +1,5 @@
 # EburonHub
 
-[![GitHub release](https://img.shields.io/github/v/release/lovegold120221-dot/ehub?style=for-the-badge&logo=android&logoColor=white)](https://github.com/lovegold120221-dot/ehub/releases)
-
-A production-ready, cross-platform AI chat client built with Flutter. It unifies local on-device LLM inference (Android) with cloud API access, giving users full control over how their models run.
-
-![Image generation tested on Moto G71 (Snapdragon), Oneplus 10r (Mediatek), Pixel 6A (Tensor), Poco F1 (Snapdragon), Samsung s23 (Snapdragon) 4 steps fast](EburonHub.png)
-_Image generation tested on Moto G71 (Snapdragon), Oneplus 10r (Mediatek), Pixel 6A (Tensor), Poco F1 (Snapdragon), Samsung s23 (Snapdragon) 4 steps fast_
-
-![Generated on pixel 6 with 20 step](IMG_2390.png)
-_Generated on pixel 6 with 20 step_
-
----
 
 ## What It Does
 
