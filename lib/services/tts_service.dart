@@ -183,6 +183,10 @@ class TtsService extends GetxService {
     _liveQueue.clear();
     _liveActive = false;
     _liveFinal = false;
+    _pendingLiveSynth?.ignore();
+    _pendingLiveSynth = null;
+    _pendingText = null;
+    _livePlaybackActive = false;
     _stopRequested = true;
     try {
       await _audioPlayer?.stop();
@@ -211,11 +215,17 @@ class TtsService extends GetxService {
   /// laugh/breath/sigh; Lite strips all). Fixed per session.
   Set<String> _liveKeepTags = const {};
 
-  /// Text of the in-flight prefetched chunk ([_pumpLive]): only reused when
-  /// the queue head still matches, otherwise dropped — never repeat speech.
+  /// Text/future for the one-chunk-ahead live prefetch. These are shared
+  /// with [feedLiveRead], so a sentence that becomes ready while chunk N is
+  /// already playing can start synthesizing immediately instead of waiting
+  /// for playback to finish.
   String? _pendingText;
+  Future<({List<double> samples, int sampleRate})>? _pendingLiveSynth;
+  bool _livePlaybackActive = false;
 
-  static const _liveFeedMinIntervalMs = 350;
+  // Keep sentence-boundary detection responsive without doing the markdown /
+  // normalization pass on every token callback.
+  static const _liveFeedMinIntervalMs = 80;
 
   /// Starts a live read-aloud session for a new model response. No-op
   /// unless auto-read is on and the selected engine is already usable —
@@ -272,7 +282,10 @@ class TtsService extends GetxService {
     _liveLastFeedMs = 0;
     _liveSynth = synth;
     _liveKeepTags = keepTags;
+    _pendingLiveSynth?.ignore();
+    _pendingLiveSynth = null;
     _pendingText = null;
+    _livePlaybackActive = false;
     _stopRequested = false;
     isSpeaking.value = true;
     _kickLivePump();
@@ -332,6 +345,7 @@ class TtsService extends GetxService {
       }
       _liveConsumed = slice.consumed;
     }
+    _primeLivePrefetch(_liveRunId);
     _kickLivePump();
   }
 
@@ -346,6 +360,20 @@ class TtsService extends GetxService {
     return full.substring(_liveConsumed.length);
   }
 
+  void _primeLivePrefetch(int run) {
+    final synth = _liveSynth;
+    if (!_livePlaybackActive ||
+        synth == null ||
+        run != _liveRunId ||
+        _stopRequested ||
+        _pendingLiveSynth != null ||
+        _liveQueue.isEmpty) {
+      return;
+    }
+    _pendingText = _liveQueue.first;
+    _pendingLiveSynth = synth(_pendingText!);
+  }
+
   void _kickLivePump() {
     if (_livePumping || !_liveActive) return;
     final synth = _liveSynth;
@@ -354,43 +382,34 @@ class TtsService extends GetxService {
     unawaited(_pumpLive(_liveRunId, synth));
   }
 
-  /// Sequential pump: synthesize each queued chunk and play it through the
-  /// shared WAV pipeline. Stale runs (superseded by stop/speak/begin) exit
-  /// without touching the newer session's flags.
-  /// Sequential pump with next-chunk prefetch: while chunk N plays,
-  /// chunk N+1 already synthesizes, so inference latency hides behind audio
-  /// instead of surfacing as a pause between sentences. Stale runs
-  /// (superseded by stop/speak/begin) exit without touching the newer
-  /// session's flags; an in-flight prefetch is always dropped silently.
+  /// Sequential pump with dynamic next-chunk prefetch: while chunk N plays,
+  /// chunk N+1 synthesizes as soon as it becomes available, even if the
+  /// model only finishes that sentence after playback has already started.
+  /// Stale runs (superseded by stop/speak/begin) never touch a newer run.
   Future<void> _pumpLive(int run, LiveSynth synth) async {
-    Future<({List<double> samples, int sampleRate})>? pending;
     try {
       final player = await _player();
       final chunkFile = await _chunkFile();
       while (run == _liveRunId) {
         if (_liveQueue.isEmpty) {
           if (_liveFinal) break;
-          await Future.delayed(const Duration(milliseconds: 120));
+          await Future.delayed(const Duration(milliseconds: 20));
           continue;
         }
+
         final chunk = _liveQueue.removeFirst();
         if (chunk.trim().isEmpty) continue;
+
         Future<({List<double> samples, int sampleRate})> current;
-        if (pending != null && _pendingText == chunk) {
-          current = pending;
+        if (_pendingLiveSynth != null && _pendingText == chunk) {
+          current = _pendingLiveSynth!;
         } else {
-          pending?.ignore();
+          _pendingLiveSynth?.ignore();
           current = synth(chunk);
         }
-        pending = null;
+        _pendingLiveSynth = null;
         _pendingText = null;
-        // Prefetch the follower while the current synthesizes/plays.
-        if (_liveQueue.isNotEmpty &&
-            run == _liveRunId &&
-            !_stopRequested) {
-          _pendingText = _liveQueue.first;
-          pending = synth(_pendingText!);
-        }
+
         List<double> wav;
         int sr;
         try {
@@ -407,12 +426,17 @@ class TtsService extends GetxService {
           break;
         }
         if (run != _liveRunId || _stopRequested) break;
+
         bool played = false;
+        _livePlaybackActive = true;
+        _primeLivePrefetch(run);
         try {
           played = await _playChunk(wav, sr, player, chunkFile);
         } catch (e) {
           _log.error('[TTS] chunk playback failed', details: e);
           break;
+        } finally {
+          if (run == _liveRunId) _livePlaybackActive = false;
         }
         if (!played) {
           _log.info('[TTS] live pump stopped after chunk');
@@ -420,12 +444,11 @@ class TtsService extends GetxService {
         }
       }
     } finally {
-      pending?.ignore();
-      // [pending] is pump-local; only the current run may clear the shared
-      // prefetch tag, otherwise a stale pump would drop the new session's
-      // in-flight synthesis.
-      if (run == _liveRunId) _pendingText = null;
       if (run == _liveRunId) {
+        _pendingLiveSynth?.ignore();
+        _pendingLiveSynth = null;
+        _pendingText = null;
+        _livePlaybackActive = false;
         _log.info('[TTS] live session ended '
             '(final=$_liveFinal, queued=${_liveQueue.length})');
         _livePumping = false;
@@ -458,12 +481,12 @@ class TtsService extends GetxService {
   /// words as later tokens arrive and would break offset tracking.
   /// [consumed] is the prefix already queued. Only text ending in a
   /// sentence boundary is returned; the trailing partial sentence waits
-  /// for more tokens. Boundary-less tails longer than 2×[maxLen] are
-  /// force-flushed so speech never stalls. Pure (unit-tested).
+  /// for more tokens. Boundary-less tails around [maxLen] are force-flushed
+  /// at a natural cut so speech starts promptly. Pure (unit-tested).
   static ({List<String> ready, String consumed}) takeLiveSlice(
     String cleaned,
     String consumed, [
-    int maxLen = 120,
+    int maxLen = 96,
   ]) {
     var start = 0;
     if (consumed.isNotEmpty) {
@@ -476,11 +499,11 @@ class TtsService extends GetxService {
     }
     final rest = cleaned.substring(start);
     var cut = -1;
-    for (final m in RegExp(r'[.!?…\n]\s+').allMatches(rest)) {
+    for (final m in RegExp(r'[.!?…\n](?:\s+|$)').allMatches(rest)) {
       cut = m.end;
     }
     if (cut < 0) {
-      if (rest.length > maxLen * 2) {
+      if (rest.length >= maxLen) {
         var cutAt = rest.lastIndexOf(RegExp(r'[ ,;:]\s'), maxLen);
         if (cutAt < maxLen ~/ 3) cutAt = maxLen;
         final piece = rest.substring(0, cutAt).trim();
@@ -568,7 +591,7 @@ class TtsService extends GetxService {
     if (peak < 0.001) return !_stopRequested; // skip silent chunks
     await chunkFile.writeAsBytes(encodeWav16(
         wav is Float32List ? wav : Float32List.fromList(wav), sampleRate),
-        flush: true);
+        flush: false);
     final done = Completer<void>();
     late final StreamSubscription<void> sub;
     sub = player.onPlayerComplete.listen((_) {
