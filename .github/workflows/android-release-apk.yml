@@ -9,6 +9,7 @@ on:
       - "android/**"
       - "local_plugins/**"
       - "assets/**"
+      - ".gitmodules"
       - "pubspec.yaml"
       - "pubspec.lock"
       - ".github/workflows/android-release-apk.yml"
@@ -25,8 +26,14 @@ jobs:
       PRIVATELM_ALLOW_DEBUG_RELEASE_SIGNING: "true"
 
     steps:
-      - name: Checkout
+      - name: Checkout with native submodules
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Verify stable-diffusion.cpp submodule
+        run: test -f local_plugins/sd_flutter_android/android/src/main/cpp/stable-diffusion.cpp/CMakeLists.txt
 
       - name: Set up Java 17
         uses: actions/setup-java@v5
