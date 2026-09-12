@@ -8,6 +8,7 @@ import 'package:get/get.dart';
 import '../core/constants.dart';
 import '../services/app_log_service.dart';
 import '../services/hive_service.dart';
+import '../services/image_generation_notification_service.dart';
 import '../services/inference_service.dart';
 import '../services/openai_server_service.dart';
 
@@ -28,6 +29,7 @@ class ServerController extends GetxController {
   late final TextEditingController apiKeyCtrl;
 
   static const int port = 8080;
+  static const int _portScanCount = 20;
 
   @override
   void onInit() {
@@ -67,30 +69,106 @@ class ServerController extends GetxController {
     await saveSettings();
 
     try {
-      await _server.start(
-        port: port,
-        apiKey: useApiKey.value ? apiKey.value : null,
-        onLog: (message) => serverStatus.value = message,
-      );
-      localUrl.value = _server.localUrl;
+      final boundPort = await _bindFirstAvailablePort();
+      final url = _server.localUrl;
+      localUrl.value = url;
       isRunning.value = true;
-      serverStatus.value = 'Server running';
+
+      var backgroundReady = false;
+      if (url != null &&
+          Get.isRegistered<ImageGenerationNotificationService>()) {
+        try {
+          await Get.find<ImageGenerationNotificationService>()
+              .startApiServer(url: url);
+          backgroundReady = true;
+        } catch (e) {
+          Get.find<AppLogService>().warning(
+            'API server foreground keep-alive failed',
+            details: e,
+          );
+        }
+      }
+
+      final portMessage = boundPort == port
+          ? 'Port $boundPort'
+          : 'Port $port busy · using $boundPort';
+      serverStatus.value = backgroundReady
+          ? '$portMessage · background enabled'
+          : '$portMessage · server running';
     } catch (e) {
       lastError.value = '$e';
       serverStatus.value = 'Server failed';
       Get.find<AppLogService>().error('API server failed', details: e);
       Get.snackbar('Server failed', '$e');
+      if (_server.isRunning) {
+        await _server.stop();
+      }
+      isRunning.value = false;
+      localUrl.value = null;
     } finally {
       isStarting.value = false;
     }
   }
 
+  /// Binds the preferred API port first, then falls forward when another app
+  /// (for example Termux or a stale dev server) already owns it. Android reports
+  /// this as errno=98. The selected port is reflected by [_server.localUrl], so
+  /// clients always receive the real endpoint rather than a hard-coded 8080.
+  Future<int> _bindFirstAvailablePort() async {
+    Object? lastAddressInUseError;
+
+    for (var offset = 0; offset < _portScanCount; offset++) {
+      final candidatePort = port + offset;
+      try {
+        await _server.start(
+          port: candidatePort,
+          apiKey: useApiKey.value ? apiKey.value : null,
+          onLog: (message) => serverStatus.value = message,
+        );
+        return candidatePort;
+      } catch (e) {
+        if (!_isAddressAlreadyInUse(e)) rethrow;
+        lastAddressInUseError = e;
+        Get.find<AppLogService>().warning(
+          'API port $candidatePort is already in use; trying next port',
+          details: e,
+        );
+      }
+    }
+
+    throw StateError(
+      'No free API port found in $port-${port + _portScanCount - 1}. '
+      'Last bind error: ${lastAddressInUseError ?? 'unknown'}',
+    );
+  }
+
+  bool _isAddressAlreadyInUse(Object error) {
+    final text = error.toString().toLowerCase();
+    return text.contains('address already in use') ||
+        text.contains('errno = 98') ||
+        text.contains('errno = 48') ||
+        text.contains('10048');
+  }
+
   Future<void> stopServer() async {
     isStarting.value = false;
     await _server.stop();
+
+    if (Get.isRegistered<ImageGenerationNotificationService>()) {
+      try {
+        await Get.find<ImageGenerationNotificationService>().stopApiServer();
+      } catch (e) {
+        Get.find<AppLogService>().warning(
+          'API server foreground keep-alive cleanup failed',
+          details: e,
+        );
+      }
+    }
+
     isRunning.value = false;
     localUrl.value = null;
     serverStatus.value = 'Server stopped';
+    lastError.value = null;
   }
 
   Future<void> saveSettings() async {
@@ -103,6 +181,7 @@ class ServerController extends GetxController {
     final bytes = List<int>.generate(24, (_) => random.nextInt(256));
     apiKey.value =
         'aichat_${bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join()}';
+    apiKeyCtrl.text = apiKey.value;
     useApiKey.value = true;
     await saveSettings();
   }
