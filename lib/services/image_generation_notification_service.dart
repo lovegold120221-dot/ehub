@@ -6,11 +6,15 @@ import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+/// Owns the Android foreground-service keep-alive used by long-running local
+/// work. Image generation and the local OpenAI API can run at the same time;
+/// each feature acquires its own lease so one feature cannot accidentally stop
+/// the foreground service while the other still needs it.
 class ImageGenerationNotificationService {
   static const int _progressNotificationId = 4201;
   static const int _foregroundNotificationId = 4202;
   static const String _channelId = 'image_generation_progress';
-  static const String _channelName = 'Image generation';
+  static const String _channelName = 'EburonHub background activity';
 
   final FlutterLocalNotificationsPlugin _notifications =
       FlutterLocalNotificationsPlugin();
@@ -28,7 +32,8 @@ class ImageGenerationNotificationService {
           const AndroidNotificationChannel(
             _channelId,
             _channelName,
-            description: 'Progress updates for local image generation',
+            description:
+                'Keeps the local API server and long-running local AI tasks active',
             importance: Importance.low,
           ),
         );
@@ -39,14 +44,13 @@ class ImageGenerationNotificationService {
     if (!Platform.isAndroid) return;
     await FlutterBackgroundService().configure(
       androidConfiguration: AndroidConfiguration(
-        onStart: imageGenerationBackgroundStart,
+        onStart: eburonBackgroundStart,
         autoStart: false,
         autoStartOnBoot: false,
         isForegroundMode: true,
         notificationChannelId: _channelId,
-        initialNotificationTitle: 'Image generation running',
-        initialNotificationContent:
-            'You can leave the app. We will notify you when it finishes.',
+        initialNotificationTitle: 'EburonHub running in background',
+        initialNotificationContent: 'Keeping local AI services available.',
         foregroundServiceNotificationId: _foregroundNotificationId,
         foregroundServiceTypes: const [AndroidForegroundType.dataSync],
       ),
@@ -54,14 +58,40 @@ class ImageGenerationNotificationService {
     );
   }
 
-  Future<void> ensurePermission() async {
+  Future<void> _requestNotificationPermission() async {
     if (!Platform.isAndroid) return;
     await _notifications
         .resolvePlatformSpecificImplementation<
             AndroidFlutterLocalNotificationsPlugin>()
         ?.requestNotificationsPermission();
     await Permission.notification.request();
+  }
+
+  Future<void> ensurePermission() async {
+    if (!Platform.isAndroid) return;
+    await _requestNotificationPermission();
     await Permission.ignoreBatteryOptimizations.request();
+  }
+
+  /// Acquires the foreground-service lease for the local OpenAI-compatible API.
+  /// The actual HttpServer remains owned by the app isolate; this service keeps
+  /// the Android process alive when the UI moves to the background.
+  Future<void> startApiServer({required String url}) async {
+    if (!Platform.isAndroid) return;
+    await init();
+    await _requestNotificationPermission();
+    final service = FlutterBackgroundService();
+    if (!await service.isRunning()) {
+      await service.startService();
+    }
+    service.invoke('apiServerActive', {'content': 'Listening on $url'});
+  }
+
+  /// Releases only the API-server lease. Image generation, when active, keeps
+  /// the foreground service alive.
+  Future<void> stopApiServer() async {
+    if (!Platform.isAndroid) return;
+    FlutterBackgroundService().invoke('apiServerInactive');
   }
 
   Future<void> start({
@@ -79,6 +109,7 @@ class ImageGenerationNotificationService {
     if (!await service.isRunning()) {
       await service.startService();
     }
+    service.invoke('imageActive', {'content': details});
     service.invoke('progress', {'content': details});
     await _showProgress(
       title: 'Image generation running',
@@ -134,14 +165,15 @@ class ImageGenerationNotificationService {
         android: AndroidNotificationDetails(
           _channelId,
           _channelName,
-          channelDescription: 'Progress updates for local image generation',
+          channelDescription:
+              'Keeps the local API server and long-running local AI tasks active',
           importance: Importance.defaultImportance,
           priority: Priority.defaultPriority,
           onlyAlertOnce: true,
         ),
       ),
     );
-    FlutterBackgroundService().invoke('stopService');
+    FlutterBackgroundService().invoke('imageInactive');
   }
 
   Future<void> failed() async {
@@ -154,21 +186,21 @@ class ImageGenerationNotificationService {
         android: AndroidNotificationDetails(
           _channelId,
           _channelName,
-          channelDescription: 'Progress updates for local image generation',
+          channelDescription:
+              'Keeps the local API server and long-running local AI tasks active',
           importance: Importance.defaultImportance,
           priority: Priority.defaultPriority,
           onlyAlertOnce: true,
         ),
       ),
     );
-    FlutterBackgroundService().invoke('stopService');
+    FlutterBackgroundService().invoke('imageInactive');
   }
 
   Future<void> cancel() async {
     if (!Platform.isAndroid) return;
     await _notifications.cancel(_progressNotificationId);
-    await _notifications.cancel(_foregroundNotificationId);
-    FlutterBackgroundService().invoke('stopService');
+    FlutterBackgroundService().invoke('imageInactive');
   }
 
   Future<void> _showProgress({
@@ -186,7 +218,8 @@ class ImageGenerationNotificationService {
         android: AndroidNotificationDetails(
           _channelId,
           _channelName,
-          channelDescription: 'Progress updates for local image generation',
+          channelDescription:
+              'Keeps the local API server and long-running local AI tasks active',
           importance: Importance.low,
           priority: Priority.low,
           ongoing: true,
@@ -218,22 +251,70 @@ class ImageGenerationNotificationService {
 }
 
 @pragma('vm:entry-point')
-void imageGenerationBackgroundStart(ServiceInstance service) async {
+void eburonBackgroundStart(ServiceInstance service) async {
   DartPluginRegistrant.ensureInitialized();
+
+  var imageActive = false;
+  var apiServerActive = false;
+  var imageContent = 'Local image generation is running.';
+  var apiContent = 'Local OpenAI API server is running.';
+
+  void refreshForegroundState() {
+    if (service is AndroidServiceInstance) {
+      if (imageActive) {
+        service.setForegroundNotificationInfo(
+          title: 'Image generation running',
+          content: imageContent,
+        );
+      } else if (apiServerActive) {
+        service.setForegroundNotificationInfo(
+          title: 'EburonHub API server running',
+          content: apiContent,
+        );
+      }
+    }
+
+    if (!imageActive && !apiServerActive) {
+      service.stopSelf();
+    }
+  }
 
   if (service is AndroidServiceInstance) {
     await service.setAsForegroundService();
-    service.on('progress').listen((event) {
-      final content = event?['content'] as String? ??
-          'You can leave the app. We will notify you when it finishes.';
-      service.setForegroundNotificationInfo(
-        title: 'Image generation running',
-        content: content,
-      );
-    });
   }
 
+  service.on('imageActive').listen((event) {
+    imageActive = true;
+    imageContent = event?['content'] as String? ?? imageContent;
+    refreshForegroundState();
+  });
+
+  service.on('progress').listen((event) {
+    imageActive = true;
+    imageContent = event?['content'] as String? ?? imageContent;
+    refreshForegroundState();
+  });
+
+  service.on('imageInactive').listen((event) {
+    imageActive = false;
+    refreshForegroundState();
+  });
+
+  service.on('apiServerActive').listen((event) {
+    apiServerActive = true;
+    apiContent = event?['content'] as String? ?? apiContent;
+    refreshForegroundState();
+  });
+
+  service.on('apiServerInactive').listen((event) {
+    apiServerActive = false;
+    refreshForegroundState();
+  });
+
+  // Backwards-compatible force-stop hook for any older callers.
   service.on('stopService').listen((event) {
+    imageActive = false;
+    apiServerActive = false;
     service.stopSelf();
   });
 }
